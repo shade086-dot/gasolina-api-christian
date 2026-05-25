@@ -325,9 +325,9 @@ async def fetch_precioil_relevant_rows() -> tuple[Any, list[dict[str, Any]]]:
     payload = await fetch_precioil_json(
         "/estaciones/radio",
         params={
-            "lat": PRECIOIL_ALCALA_LAT,
-            "lon": PRECIOIL_ALCALA_LON,
-            "radio": PRECIOIL_SEARCH_RADIUS_METERS,
+            "latitud": PRECIOIL_ALCALA_LAT,
+            "longitud": PRECIOIL_ALCALA_LON,
+            "radio": 15,
         },
     )
     return payload, extract_relevant_rows_precioil(payload)
