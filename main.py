@@ -7,9 +7,12 @@ import unicodedata
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote_plus, urlencode
+import html
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import HTMLResponse
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
@@ -28,6 +31,45 @@ PRECIOIL_CABANILLAS_AZUQUECA_LON = -3.2500
 
 # Precioil usa radio en km, no en metros.
 PRECIOIL_SEARCH_RADIUS_KM = 15
+
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://gasolina-api-christian.onrender.com").rstrip("/")
+
+# Coordenadas aproximadas para pintar mapa visual orientativo.
+# Las coordenadas exactas de las gasolineras vienen de Precioil.
+ROUTE_ENDPOINTS = {
+    "cabanillas_return": {
+        "origin_name": "DSV / Cabanillas del Campo",
+        "origin_lat": 40.6302,
+        "origin_lon": -3.2357,
+        "destination_name": "Anchuelo",
+        "destination_lat": 40.4667,
+        "destination_lon": -3.2687,
+    },
+    "forus_return": {
+        "origin_name": "Forus Alcalá Forjas",
+        "origin_lat": 40.4930,
+        "origin_lon": -3.3790,
+        "destination_name": "Anchuelo",
+        "destination_lat": 40.4667,
+        "destination_lon": -3.2687,
+    },
+    "forus_out": {
+        "origin_name": "Anchuelo",
+        "origin_lat": 40.4667,
+        "origin_lon": -3.2687,
+        "destination_name": "Forus Alcalá Forjas",
+        "destination_lat": 40.4930,
+        "destination_lon": -3.3790,
+    },
+    "alcala": {
+        "origin_name": "Forus Alcalá Forjas",
+        "origin_lat": 40.4930,
+        "origin_lon": -3.3790,
+        "destination_name": "Anchuelo",
+        "destination_lat": 40.4667,
+        "destination_lon": -3.2687,
+    },
+}
 
 PRECIOIL_REGIONS = {
     "alcala_daganzo": {
@@ -462,6 +504,191 @@ def choose_best(rows: list[dict[str, Any]], segment: str) -> dict[str, Any]:
     return {"segment": segment, "recommended": best, "alternatives": alternatives}
 
 
+def station_lat_lon(row: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    lat = first_present(raw, ["latitud", "lat", "latitude"])
+    lon = first_present(raw, ["longitud", "lon", "lng", "longitude"])
+    try:
+        return float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None, None
+
+
+def format_price_label(price: Any) -> str:
+    if price is None:
+        return "precio no disponible"
+    try:
+        return f"{float(price):.3f} €/l"
+    except (TypeError, ValueError):
+        return str(price)
+
+
+def map_marker_from_station(row: dict[str, Any], role: str) -> dict[str, Any]:
+    lat, lon = station_lat_lon(row)
+    return {
+        "role": role,
+        "station_key": row.get("station_key"),
+        "name": row.get("station_name") or row.get("station_key"),
+        "address": row.get("address"),
+        "municipality": row.get("municipality"),
+        "price": row.get("price"),
+        "price_label": format_price_label(row.get("price")),
+        "updated_at": row.get("official_timestamp"),
+        "source": row.get("source"),
+        "lat": lat,
+        "lon": lon,
+        "google_maps_place": google_maps_place_link(row),
+        "apple_maps_place": apple_maps_place_link(row),
+    }
+
+
+def coord_text(lat: float, lon: float) -> str:
+    return f"{lat:.6f},{lon:.6f}"
+
+
+def google_maps_place_link(row: dict[str, Any]) -> str:
+    lat, lon = station_lat_lon(row)
+    query = " ".join(str(x) for x in [row.get("station_name"), row.get("address"), row.get("municipality")] if x)
+    if lat is not None and lon is not None:
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}&query_place_id=" if query else f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
+
+
+def apple_maps_place_link(row: dict[str, Any]) -> str:
+    lat, lon = station_lat_lon(row)
+    label = " ".join(str(x) for x in [row.get("station_name"), row.get("address"), format_price_label(row.get("price"))] if x)
+    if lat is not None and lon is not None:
+        return f"https://maps.apple.com/?ll={lat},{lon}&q={quote_plus(label)}"
+    return f"https://maps.apple.com/?q={quote_plus(label)}"
+
+
+def build_google_directions(origin: dict[str, Any], destination: dict[str, Any], waypoints: list[dict[str, Any]]) -> str:
+    origin_coord = coord_text(origin["origin_lat"], origin["origin_lon"])
+    destination_coord = coord_text(destination["destination_lat"], destination["destination_lon"])
+    waypoint_coords = []
+    for station in waypoints:
+        lat, lon = station_lat_lon(station)
+        if lat is not None and lon is not None:
+            waypoint_coords.append(coord_text(lat, lon))
+    params = {
+        "api": "1",
+        "origin": origin_coord,
+        "destination": destination_coord,
+        "travelmode": "driving",
+    }
+    if waypoint_coords:
+        params["waypoints"] = "|".join(waypoint_coords)
+    return "https://www.google.com/maps/dir/?" + urlencode(params)
+
+
+def build_apple_directions(origin: dict[str, Any], station: Optional[dict[str, Any]] = None) -> str:
+    saddr = coord_text(origin["origin_lat"], origin["origin_lon"])
+    if station:
+        lat, lon = station_lat_lon(station)
+        daddr = coord_text(lat, lon) if lat is not None and lon is not None else str(station.get("address") or station.get("station_name"))
+    else:
+        daddr = coord_text(origin["destination_lat"], origin["destination_lon"])
+    return f"https://maps.apple.com/?saddr={quote_plus(saddr)}&daddr={quote_plus(daddr)}&dirflg=d"
+
+
+def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
+    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    recommended = result.get("recommended") if isinstance(result.get("recommended"), dict) else None
+    alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
+    stations = ([recommended] if recommended else []) + alternatives
+    markers = [map_marker_from_station(station, "recommended" if idx == 0 else "alternative") for idx, station in enumerate(stations)]
+    valid_stations = [station for station in stations if station_lat_lon(station)[0] is not None]
+    return {
+        "type": "visual_map_links",
+        "note": "Mapa visual orientativo. Los precios se muestran en los marcadores/popup y en el informe; la ruta exacta puede variar según navegación/tráfico.",
+        "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
+        "google_maps_recommended_route": build_google_directions(endpoint, endpoint, valid_stations[:1]),
+        "google_maps_all_candidates_route": build_google_directions(endpoint, endpoint, valid_stations),
+        "apple_maps_recommended_station": build_apple_directions(endpoint, recommended) if recommended else build_apple_directions(endpoint),
+        "origin": {
+            "name": endpoint["origin_name"],
+            "lat": endpoint["origin_lat"],
+            "lon": endpoint["origin_lon"],
+        },
+        "destination": {
+            "name": endpoint["destination_name"],
+            "lat": endpoint["destination_lat"],
+            "lon": endpoint["destination_lon"],
+        },
+        "markers": markers,
+    }
+
+
+def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: dict[str, Any]) -> str:
+    markers_json = json.dumps(map_payload.get("markers", []), ensure_ascii=False)
+    origin_json = json.dumps(map_payload.get("origin", {}), ensure_ascii=False)
+    destination_json = json.dumps(map_payload.get("destination", {}), ensure_ascii=False)
+    recommended = result.get("recommended", {}) if isinstance(result.get("recommended"), dict) else {}
+    title = f"Gasolina — {segment}"
+    subtitle = f"Recomendada: {recommended.get('station_name', 'N/D')} · {format_price_label(recommended.get('price'))}"
+    google_link = html.escape(map_payload.get("google_maps_all_candidates_route", ""))
+    apple_link = html.escape(map_payload.get("apple_maps_recommended_station", ""))
+    return f"""
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{html.escape(title)}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f7f8; }}
+    header {{ padding: 14px 16px; background: white; border-bottom: 1px solid #ddd; }}
+    h1 {{ margin: 0 0 4px; font-size: 18px; }}
+    p {{ margin: 0; color: #555; font-size: 14px; }}
+    .links {{ margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }}
+    .links a {{ background: #111; color: white; padding: 8px 10px; border-radius: 10px; text-decoration: none; font-size: 13px; }}
+    #map {{ height: calc(100vh - 118px); width: 100%; }}
+    .price {{ font-weight: 700; font-size: 16px; }}
+    .badge {{ display: inline-block; padding: 2px 6px; border-radius: 6px; background: #eee; margin-bottom: 4px; }}
+  </style>
+</head>
+<body>
+<header>
+  <h1>{html.escape(title)}</h1>
+  <p>{html.escape(subtitle)}</p>
+  <div class="links">
+    <a href="{google_link}" target="_blank">Abrir ruta en Google Maps</a>
+    <a href="{apple_link}" target="_blank">Abrir en Apple Maps</a>
+  </div>
+</header>
+<div id="map"></div>
+<script>
+const markers = {markers_json};
+const origin = {origin_json};
+const destination = {destination_json};
+const map = L.map('map');
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap'
+}}).addTo(map);
+const bounds = [];
+function addPoint(lat, lon, label, popup, color) {{
+  if (lat == null || lon == null) return;
+  bounds.push([lat, lon]);
+  L.circleMarker([lat, lon], {{ radius: 8, color, fillColor: color, fillOpacity: 0.85 }}).addTo(map).bindPopup(popup);
+}}
+addPoint(origin.lat, origin.lon, origin.name, '<b>Origen</b><br>' + origin.name, '#333');
+addPoint(destination.lat, destination.lon, destination.name, '<b>Destino</b><br>' + destination.name, '#333');
+markers.forEach((m, idx) => {{
+  const color = m.role === 'recommended' ? '#16803c' : '#d97706';
+  const badge = m.role === 'recommended' ? 'Recomendada' : 'Alternativa';
+  const popup = `<span class="badge">${{badge}}</span><br><b>${{m.name || ''}}</b><br>${{m.address || ''}}<br><span class="price">${{m.price_label || ''}}</span><br>Actualizado: ${{m.updated_at || 'N/D'}}<br>Fuente: ${{m.source || 'N/D'}}`;
+  addPoint(m.lat, m.lon, m.name, popup, color);
+}});
+if (bounds.length) {{ map.fitBounds(bounds, {{ padding: [30, 30] }}); }} else {{ map.setView([40.5, -3.3], 11); }}
+</script>
+</body>
+</html>
+"""
+
+
 def manual_fallback(segment: str) -> dict[str, Any]:
     fallback_by_segment = {
         "forus_return": {
@@ -614,6 +841,7 @@ async def recommend(
                 "precioil_raw_items_count": len(items),
                 "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
                 **result,
+                "map": build_map_payload(segment, result),
             }
         except HTTPException as e:
             precioil_error = e.detail
@@ -627,6 +855,7 @@ async def recommend(
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "Precioil falló y la fuente oficial no se usó porque source=precioil.",
+                    "map": build_map_payload(segment, {"recommended": manual_fallback(segment), "alternatives": []}),
                 }
 
     if source in ("official", "auto"):
@@ -643,6 +872,7 @@ async def recommend(
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
                 "segment": segment,
                 **result,
+                "map": build_map_payload(segment, result),
             }
         except HTTPException as official_error:
             if source == "official":
@@ -655,6 +885,7 @@ async def recommend(
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "La fuente oficial falló y Precioil no se usó porque source=official.",
+                    "map": build_map_payload(segment, {"recommended": manual_fallback(segment), "alternatives": []}),
                 }
 
             return {
@@ -667,9 +898,34 @@ async def recommend(
                 "recommended": manual_fallback(segment),
                 "alternatives": [],
                 "warning": "Fallaron Precioil y fuente oficial.",
+                "map": build_map_payload(segment, {"recommended": manual_fallback(segment), "alternatives": []}),
             }
 
     raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
+
+
+@app.get("/map", response_class=HTMLResponse)
+async def map_view(
+    segment: str = Query(default="auto"),
+    source: str = Query(default="precioil"),
+) -> HTMLResponse:
+    segment = resolve_auto_segment(segment)
+
+    try:
+        if source in ("precioil", "auto"):
+            payload, rows = await fetch_precioil_relevant_rows(segment)
+            result = choose_best(rows, segment)
+        elif source == "official":
+            payload = await fetch_official_data()
+            rows = extract_relevant_rows(payload)
+            result = choose_best(rows, segment)
+        else:
+            raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
+    except HTTPException:
+        result = {"recommended": manual_fallback(segment), "alternatives": []}
+
+    map_payload = build_map_payload(segment, result)
+    return HTMLResponse(render_visual_map_html(segment, result, map_payload))
 
 @app.get("/history/{station_key}")
 def history(station_key: str, limit: int = 50) -> dict[str, Any]:
