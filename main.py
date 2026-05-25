@@ -16,11 +16,33 @@ CONFIG_PATH = APP_DIR / "config.json"
 DB_PATH = APP_DIR / "gasolina_history.sqlite3"
 
 PRECIOIL_BASE_URL = "https://api.precioil.es"
+
+# Zonas de búsqueda Precioil.
+# Alcalá/Daganzo: útil para Forus -> Anchuelo y Anchuelo -> Forus.
 PRECIOIL_ALCALA_LAT = 40.48198
 PRECIOIL_ALCALA_LON = -3.36354
+
+# Punto intermedio Cabanillas/Azuqueca: útil para DSV/Cabanillas -> Anchuelo.
+PRECIOIL_CABANILLAS_AZUQUECA_LAT = 40.6000
+PRECIOIL_CABANILLAS_AZUQUECA_LON = -3.2500
+
+# Precioil usa radio en km, no en metros.
 PRECIOIL_SEARCH_RADIUS_KM = 15
 
-app = FastAPI(title="Gasolina Christian API", version="1.1.0")
+PRECIOIL_REGIONS = {
+    "alcala_daganzo": {
+        "latitud": PRECIOIL_ALCALA_LAT,
+        "longitud": PRECIOIL_ALCALA_LON,
+        "radio": PRECIOIL_SEARCH_RADIUS_KM,
+    },
+    "cabanillas_azuqueca": {
+        "latitud": PRECIOIL_CABANILLAS_AZUQUECA_LAT,
+        "longitud": PRECIOIL_CABANILLAS_AZUQUECA_LON,
+        "radio": PRECIOIL_SEARCH_RADIUS_KM,
+    },
+}
+
+app = FastAPI(title="Gasolina Christian API", version="1.2.0")
 
 
 def load_config() -> dict[str, Any]:
@@ -339,16 +361,56 @@ def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
     return found
 
 
-async def fetch_precioil_relevant_rows() -> tuple[Any, list[dict[str, Any]]]:
-    payload = await fetch_precioil_json(
-        "/estaciones/radio",
-        params={
-            "latitud": PRECIOIL_ALCALA_LAT,
-            "longitud": PRECIOIL_ALCALA_LON,
-            "radio": PRECIOIL_SEARCH_RADIUS_KM,
-        },
-    )
-    return payload, extract_relevant_rows_precioil(payload)
+def precioil_regions_for_segment(segment: str = "all") -> list[str]:
+    if segment == "cabanillas_return":
+        return ["cabanillas_azuqueca"]
+    if segment in ("forus_out", "forus_return", "alcala"):
+        return ["alcala_daganzo"]
+    return ["alcala_daganzo", "cabanillas_azuqueca"]
+
+
+def dedupe_precioil_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+
+    for item in items:
+        station_id = first_present(item, ["idEstacion", "id", "station_id"])
+        key = str(station_id) if station_id is not None else f"{norm(item.get('marca'))}|{norm(item.get('direccion'))}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return deduped
+
+
+async def fetch_precioil_relevant_rows(segment: str = "all") -> tuple[Any, list[dict[str, Any]]]:
+    all_items: list[dict[str, Any]] = []
+    region_errors: dict[str, str] = {}
+
+    for region_name in precioil_regions_for_segment(segment):
+        try:
+            payload = await fetch_precioil_json(
+                "/estaciones/radio",
+                params=PRECIOIL_REGIONS[region_name],
+            )
+            for item in precioil_station_items(payload):
+                item = dict(item)
+                item["precioil_region"] = region_name
+                all_items.append(item)
+        except HTTPException as e:
+            region_errors[region_name] = str(e.detail)
+
+    all_items = dedupe_precioil_items(all_items)
+
+    if not all_items and region_errors:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Precioil no devolvió datos en ninguna zona: {region_errors}",
+        )
+
+    rows = extract_relevant_rows_precioil(all_items)
+    return {"items": all_items, "region_errors": region_errors}, rows
 
 
 def save_observations(rows: list[dict[str, Any]]) -> None:
@@ -447,41 +509,68 @@ def health() -> dict[str, str]:
 
 
 @app.get("/debug-precioil")
-async def debug_precioil() -> dict[str, Any]:
+async def debug_precioil(segment: str = Query(default="all")) -> dict[str, Any]:
     try:
-        payload = await fetch_precioil_json(
-            "/estaciones/radio",
-            params={
-                "latitud": PRECIOIL_ALCALA_LAT,
-                "longitud": PRECIOIL_ALCALA_LON,
-                "radio": PRECIOIL_SEARCH_RADIUS_KM,
-            },
-        )
-        items = precioil_station_items(payload)
-        rows = extract_relevant_rows_precioil(payload)
+        payload, rows = await fetch_precioil_relevant_rows(segment)
+        items = payload.get("items", []) if isinstance(payload, dict) else precioil_station_items(payload)
         return {
             "ok": True,
             "source": "precioil",
+            "segment": segment,
+            "regions_used": precioil_regions_for_segment(segment),
             "items_count": len(items),
             "matched_count": len(rows),
             "matched_stations": rows,
-            "sample_start": str(payload)[:1500],
+            "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
+            "sample_start": str(items[:5])[:1500],
         }
     except HTTPException as e:
         return {"ok": False, "detail": e.detail}
+    except Exception as e:
+        return {"ok": False, "detail": f"Error interno en debug_precioil: {type(e).__name__}: {e}"}
 
 
 @app.get("/prices")
-async def prices(save: bool = Query(default=True), source: str = Query(default="auto")) -> dict[str, Any]:
-    if source in ("auto", "official"):
+async def prices(
+    save: bool = Query(default=True),
+    source: str = Query(default="precioil"),
+    segment: str = Query(default="all"),
+) -> dict[str, Any]:
+    # source: precioil | official | auto
+    # Por defecto Precioil es la fuente principal práctica; official queda como opción explícita/fallback.
+    precioil_error: Any = None
+
+    if source in ("precioil", "auto"):
+        try:
+            payload, rows = await fetch_precioil_relevant_rows(segment)
+            if save:
+                save_observations(rows)
+            items = payload.get("items", []) if isinstance(payload, dict) else precioil_station_items(payload)
+            return {
+                "status": "ok",
+                "source": "precioil",
+                "segment": segment,
+                "regions_used": precioil_regions_for_segment(segment),
+                "count": len(rows),
+                "stations": rows,
+                "raw_items_count": len(items),
+                "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
+            }
+        except HTTPException as e:
+            precioil_error = e.detail
+            if source == "precioil":
+                raise e
+
+    if source in ("official", "auto"):
         try:
             payload = await fetch_official_data()
             rows = extract_relevant_rows(payload)
             if save:
                 save_observations(rows)
             return {
-                "status": "ok",
+                "status": "degraded" if precioil_error else "ok",
                 "source": "official",
+                "precioil_error": precioil_error,
                 "official_timestamp": payload.get("Fecha", ""),
                 "count": len(rows),
                 "stations": rows,
@@ -489,70 +578,98 @@ async def prices(save: bool = Query(default=True), source: str = Query(default="
         except HTTPException as official_error:
             if source == "official":
                 raise official_error
-            official_detail = official_error.detail
-    else:
-        official_detail = None
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "precioil_error": precioil_error,
+                    "official_error": official_error.detail,
+                },
+            )
 
-    payload, rows = await fetch_precioil_relevant_rows()
-    if save:
-        save_observations(rows)
-    return {
-        "status": "degraded" if official_detail else "ok",
-        "source": "precioil",
-        "official_error": official_detail,
-        "count": len(rows),
-        "stations": rows,
-        "raw_items_count": len(precioil_station_items(payload)),
-    }
-
+    raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
 
 @app.get("/recommend")
-async def recommend(segment: str = Query(default="auto")) -> dict[str, Any]:
+async def recommend(
+    segment: str = Query(default="auto"),
+    source: str = Query(default="precioil"),
+) -> dict[str, Any]:
+    # source: precioil | official | auto
+    # Precioil queda como fuente principal. La oficial solo se usa si se pide explícitamente o como fallback en auto.
     segment = resolve_auto_segment(segment)
+    precioil_error: Any = None
 
-    try:
-        payload = await fetch_official_data()
-        rows = extract_relevant_rows(payload)
-        save_observations(rows)
-        result = choose_best(rows, segment)
-        return {
-            "status": "ok",
-            "source": "official",
-            "official_timestamp": payload.get("Fecha", ""),
-            "fetched_at": datetime.now().isoformat(timespec="seconds"),
-            "segment": segment,
-            **result,
-        }
-    except HTTPException as official_error:
-        official_detail = official_error.detail
+    if source in ("precioil", "auto"):
+        try:
+            payload, rows = await fetch_precioil_relevant_rows(segment)
+            save_observations(rows)
+            result = choose_best(rows, segment)
+            items = payload.get("items", []) if isinstance(payload, dict) else precioil_station_items(payload)
+            return {
+                "status": "ok",
+                "source": "precioil",
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "segment": segment,
+                "regions_used": precioil_regions_for_segment(segment),
+                "precioil_matched_count": len(rows),
+                "precioil_raw_items_count": len(items),
+                "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
+                **result,
+            }
+        except HTTPException as e:
+            precioil_error = e.detail
+            if source == "precioil":
+                return {
+                    "status": "fallback",
+                    "source": "manual",
+                    "precioil_error": precioil_error,
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    "segment": segment,
+                    "recommended": manual_fallback(segment),
+                    "alternatives": [],
+                    "warning": "Precioil falló y la fuente oficial no se usó porque source=precioil.",
+                }
 
-    try:
-        payload, rows = await fetch_precioil_relevant_rows()
-        save_observations(rows)
-        result = choose_best(rows, segment)
-        return {
-            "status": "degraded",
-            "source": "precioil",
-            "official_error": official_detail,
-            "fetched_at": datetime.now().isoformat(timespec="seconds"),
-            "segment": segment,
-            "precioil_matched_count": len(rows),
-            "precioil_raw_items_count": len(precioil_station_items(payload)),
-            **result,
-        }
-    except HTTPException as precioil_error:
-        return {
-            "status": "fallback",
-            "source": "manual",
-            "official_error": official_detail,
-            "precioil_error": precioil_error.detail,
-            "fetched_at": datetime.now().isoformat(timespec="seconds"),
-            "segment": segment,
-            "recommended": manual_fallback(segment),
-            "alternatives": [],
-            "warning": "No hay precio actualizado porque fallaron fuente oficial y Precioil.",
-        }
+    if source in ("official", "auto"):
+        try:
+            payload = await fetch_official_data()
+            rows = extract_relevant_rows(payload)
+            save_observations(rows)
+            result = choose_best(rows, segment)
+            return {
+                "status": "degraded" if precioil_error else "ok",
+                "source": "official",
+                "precioil_error": precioil_error,
+                "official_timestamp": payload.get("Fecha", ""),
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "segment": segment,
+                **result,
+            }
+        except HTTPException as official_error:
+            if source == "official":
+                return {
+                    "status": "fallback",
+                    "source": "manual",
+                    "official_error": official_error.detail,
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    "segment": segment,
+                    "recommended": manual_fallback(segment),
+                    "alternatives": [],
+                    "warning": "La fuente oficial falló y Precioil no se usó porque source=official.",
+                }
 
+            return {
+                "status": "fallback",
+                "source": "manual",
+                "precioil_error": precioil_error,
+                "official_error": official_error.detail,
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "segment": segment,
+                "recommended": manual_fallback(segment),
+                "alternatives": [],
+                "warning": "Fallaron Precioil y fuente oficial.",
+            }
+
+    raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
 
 @app.get("/history/{station_key}")
 def history(station_key: str, limit: int = 50) -> dict[str, Any]:
