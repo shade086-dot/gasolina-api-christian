@@ -18,7 +18,7 @@ DB_PATH = APP_DIR / "gasolina_history.sqlite3"
 PRECIOIL_BASE_URL = "https://api.precioil.es"
 PRECIOIL_ALCALA_LAT = 40.48198
 PRECIOIL_ALCALA_LON = -3.36354
-PRECIOIL_SEARCH_RADIUS_METERS = 25000
+PRECIOIL_SEARCH_RADIUS_KM = 15
 
 app = FastAPI(title="Gasolina Christian API", version="1.1.0")
 
