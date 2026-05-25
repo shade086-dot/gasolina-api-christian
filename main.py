@@ -258,8 +258,16 @@ def precioil_station_items(payload: Any) -> list[dict[str, Any]]:
 
 def extract_price_95_from_precioil(row: dict[str, Any]) -> Optional[float]:
     direct_candidates = [
-        "Precio Gasolina 95 E5", "precio_gasolina_95_e5", "gasolina_95_e5",
-        "gasolina95", "gasolina_95", "sp95", "SP95", "precio95", "precio_95",
+        "Precio Gasolina 95 E5",
+        "precio_gasolina_95_e5",
+        "gasolina_95_e5",
+        "Gasolina95",
+        "gasolina95",
+        "gasolina_95",
+        "SP95",
+        "sp95",
+        "precio95",
+        "precio_95",
     ]
     direct = first_present(row, direct_candidates)
     price = parse_price(direct)
@@ -303,7 +311,17 @@ def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
             station_name = str(first_present(r, ["Rótulo", "Rotulo", "rotulo", "nombre", "Nombre", "marca", "Marca", "brand"]) or "")
             address = str(first_present(r, ["Dirección", "Direccion", "direccion", "address", "Address"]) or "")
             municipality = str(first_present(r, ["Municipio", "municipio", "localidad", "Localidad", "city", "poblacion"]) or "")
-            updated_at = first_present(r, ["fecha_actualizacion", "fechaActualizacion", "updated_at", "updatedAt", "ultima_actualizacion"])
+            updated_at = first_present(
+                r,
+                [
+                    "lastUpdate",
+                    "fecha_actualizacion",
+                    "fechaActualizacion",
+                    "updated_at",
+                    "updatedAt",
+                    "ultima_actualizacion",
+                ],
+            )
 
             found.append({
                 "station_key": station_cfg["key"],
