@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
@@ -69,11 +69,72 @@ def startup() -> None:
 
 
 async def fetch_official_data() -> dict[str, Any]:
+
     cfg = load_config()
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(cfg["official_endpoint"])
-        r.raise_for_status()
-        return r.json()
+
+    try:
+
+        async with httpx.AsyncClient(
+
+            timeout=httpx.Timeout(60.0, connect=20.0),
+
+            follow_redirects=True,
+
+            headers={
+
+                "User-Agent": "Mozilla/5.0 gasolina-api-christian/1.0",
+
+                "Accept": "application/json,text/plain,*/*",
+
+            },
+
+        ) as client:
+
+            r = await client.get(cfg["official_endpoint"])
+
+            r.raise_for_status()
+
+            return r.json()
+
+    except httpx.TimeoutException as e:
+
+        raise HTTPException(
+
+            status_code=504,
+
+            detail=f"Timeout consultando fuente oficial de carburantes: {type(e).__name__}: {e}",
+
+        )
+
+    except httpx.HTTPStatusError as e:
+
+        raise HTTPException(
+
+            status_code=502,
+
+            detail=f"Fuente oficial devolvió error HTTP {e.response.status_code}",
+
+        )
+
+    except httpx.RequestError as e:
+
+        raise HTTPException(
+
+            status_code=502,
+
+            detail=f"No se pudo conectar con la fuente oficial: {type(e).__name__}: {e}",
+
+        )
+
+    except Exception as e:
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail=f"Error inesperado consultando fuente oficial: {type(e).__name__}: {e}",
+
+        )
 
 
 def station_matches(row: dict[str, Any], station_cfg: dict[str, Any]) -> bool:
