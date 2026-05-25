@@ -624,41 +624,158 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     origin_json = json.dumps(map_payload.get("origin", {}), ensure_ascii=False)
     destination_json = json.dumps(map_payload.get("destination", {}), ensure_ascii=False)
     recommended = result.get("recommended", {}) if isinstance(result.get("recommended"), dict) else {}
+    alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
     title = f"Gasolina — {segment}"
-    subtitle = f"Recomendada: {recommended.get('station_name', 'N/D')} · {format_price_label(recommended.get('price'))}"
-    google_link = html.escape(map_payload.get("google_maps_all_candidates_route", ""))
+    subtitle = f"{map_payload.get('origin', {}).get('name', 'Origen')} → {map_payload.get('destination', {}).get('name', 'Destino')}"
+    google_recommended_link = html.escape(map_payload.get("google_maps_recommended_route", ""))
+    google_all_link = html.escape(map_payload.get("google_maps_all_candidates_route", ""))
     apple_link = html.escape(map_payload.get("apple_maps_recommended_station", ""))
+
+    def station_card(row: dict[str, Any], role: str) -> str:
+        if not row:
+            return ""
+        name = html.escape(str(row.get("station_name") or row.get("station_key") or "N/D"))
+        address = html.escape(str(row.get("address") or ""))
+        municipality = html.escape(str(row.get("municipality") or ""))
+        price = html.escape(format_price_label(row.get("price")))
+        updated = html.escape(str(row.get("official_timestamp") or "N/D"))
+        badge = "RECOMENDADA" if role == "recommended" else "ALTERNATIVA"
+        klass = "recommended" if role == "recommended" else "alternative"
+        return f"""
+        <div class=\"station-card {klass}\">
+          <div class=\"station-top\">
+            <span class=\"badge\">{badge}</span>
+            <span class=\"station-price\">{price}</span>
+          </div>
+          <h3>{name}</h3>
+          <p>{address}<br><span>{municipality}</span></p>
+          <small>Actualizado: {updated}</small>
+        </div>
+        """
+
+    alt_cards = "".join(station_card(a, "alternative") for a in alternatives[:3])
+    recommended_card = station_card(recommended, "recommended")
+
     return f"""
 <!doctype html>
-<html lang="es">
+<html lang=\"es\">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>{html.escape(title)}</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\" />
+  <script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f7f8; }}
-    header {{ padding: 14px 16px; background: white; border-bottom: 1px solid #ddd; }}
-    h1 {{ margin: 0 0 4px; font-size: 18px; }}
-    p {{ margin: 0; color: #555; font-size: 14px; }}
-    .links {{ margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }}
-    .links a {{ background: #111; color: white; padding: 8px 10px; border-radius: 10px; text-decoration: none; font-size: 13px; }}
-    #map {{ height: calc(100vh - 118px); width: 100%; }}
-    .price {{ font-weight: 700; font-size: 16px; }}
-    .badge {{ display: inline-block; padding: 2px 6px; border-radius: 6px; background: #eee; margin-bottom: 4px; }}
+    :root {{ --green:#16803c; --orange:#d97706; --ink:#1f2933; --muted:#5f6b76; --blue:#2563eb; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f4f6f8; color: var(--ink); }}
+    .page {{ max-width: 1180px; margin: 0 auto; padding: 14px; }}
+    .hero {{ background: #fff; border: 1px solid #dbe4ee; border-radius: 18px; padding: 14px 16px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
+    .hero h1 {{ margin: 0 0 4px; font-size: 22px; letter-spacing: .2px; }}
+    .hero p {{ margin: 0; color: var(--muted); font-size: 14px; }}
+    .layout {{ display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }}
+    .croquis {{ background: #fff; border: 1px solid #dbe4ee; border-radius: 18px; padding: 14px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
+    .croquis-title {{ display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 10px; }}
+    .croquis-title h2 {{ margin: 0; font-size: 17px; }}
+    .pill {{ background: #e8f2ff; color:#174a8b; padding: 5px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }}
+    .route-line {{ display: grid; grid-template-columns: 1fr 36px 1fr 36px 1fr; align-items: center; margin: 12px 0 14px; }}
+    .node {{ background:#f9fafb; border:1px solid #d7dee8; border-radius: 14px; padding: 10px; min-height: 76px; }}
+    .node b {{ display:block; font-size: 15px; }}
+    .node span {{ color:var(--muted); font-size: 12px; }}
+    .arrow {{ height: 3px; background:#445566; position: relative; }}
+    .arrow:after {{ content:''; position:absolute; right:-1px; top:-5px; width:0; height:0; border-top:7px solid transparent; border-bottom:7px solid transparent; border-left:9px solid #445566; }}
+    .cards {{ display: grid; grid-template-columns: 1fr; gap: 10px; }}
+    .station-card {{ border-radius: 15px; padding: 12px; border: 2px solid #e5e7eb; background:#fff; }}
+    .station-card.recommended {{ border-color: var(--green); background: #ecfdf3; }}
+    .station-card.alternative {{ border-color: var(--orange); background: #fff7ed; }}
+    .station-top {{ display:flex; justify-content:space-between; gap:10px; align-items:center; }}
+    .badge {{ display:inline-block; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; color:#fff; background:var(--green); }}
+    .alternative .badge {{ background:var(--orange); }}
+    .station-price {{ font-weight:900; font-size:20px; }}
+    .station-card h3 {{ margin: 8px 0 4px; font-size: 17px; }}
+    .station-card p {{ margin: 0 0 6px; color: var(--muted); font-size: 13px; line-height:1.35; }}
+    .station-card small {{ color: var(--muted); }}
+    .map-wrap {{ background:#fff; border: 1px solid #dbe4ee; border-radius: 18px; padding: 12px; margin-top: 12px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
+    .map-head {{ display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom: 8px; }}
+    .map-head h2 {{ margin:0; font-size:17px; }}
+    .distance {{ color:var(--muted); font-size:13px; }}
+    #map {{ height: 52vh; min-height: 420px; width: 100%; border-radius: 14px; overflow:hidden; }}
+    .actions {{ background:#fff; border:1px solid #dbe4ee; border-radius:18px; padding:14px; margin-top:12px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
+    .actions h2 {{ margin:0 0 10px; font-size:17px; }}
+    .links {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }}
+    .links a {{ display:block; text-align:center; background: #111827; color: white; padding: 12px 10px; border-radius: 13px; text-decoration: none; font-size: 14px; font-weight: 700; }}
+    .links a.secondary {{ background:#374151; }}
+    .links a.apple {{ background:#0f766e; }}
+    .note {{ margin-top:10px; color:var(--muted); font-size:12px; }}
+    .price {{ font-weight: 800; font-size: 16px; }}
+    @media (max-width: 820px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+      .route-line {{ grid-template-columns: 1fr; gap: 8px; }}
+      .arrow {{ height: 28px; width: 3px; margin-left: 18px; }}
+      .arrow:after {{ right:-5px; top:21px; border-left:7px solid transparent; border-right:7px solid transparent; border-top:9px solid #445566; border-bottom:0; }}
+      .links {{ grid-template-columns: 1fr; }}
+      #map {{ height: 55vh; min-height: 360px; }}
+    }}
   </style>
 </head>
 <body>
-<header>
-  <h1>{html.escape(title)}</h1>
-  <p>{html.escape(subtitle)}</p>
-  <div class="links">
-    <a href="{google_link}" target="_blank">Abrir ruta en Google Maps</a>
-    <a href="{apple_link}" target="_blank">Abrir en Apple Maps</a>
-  </div>
-</header>
-<div id="map"></div>
+  <main class=\"page\">
+    <section class=\"hero\">
+      <h1>{html.escape(title)}</h1>
+      <p>{html.escape(subtitle)} · Fuente principal: API Render / Precioil · SP95</p>
+    </section>
+
+    <section class=\"layout\">
+      <div class=\"croquis\">
+        <div class=\"croquis-title\"><h2>Croquis de decisión</h2><span class=\"pill\" id=\"routeDistance\">Calculando distancia…</span></div>
+        <div class=\"route-line\">
+          <div class=\"node\"><b id=\"originName\">Origen</b><span>Salida</span></div>
+          <div class=\"arrow\"></div>
+          <div class=\"node\"><b id=\"recommendedNode\">Repostaje recomendado</b><span id=\"recommendedPrice\">Precio</span></div>
+          <div class=\"arrow\"></div>
+          <div class=\"node\"><b id=\"destinationName\">Destino</b><span>Llegada</span></div>
+        </div>
+        <div class=\"cards\">
+          {recommended_card}
+          {alt_cards}
+        </div>
+      </div>
+
+      <div class=\"croquis\">
+        <div class=\"croquis-title\"><h2>Resumen rápido</h2><span class=\"pill\">Ruta orientativa</span></div>
+        <p style=\"margin:0 0 10px;color:var(--muted);line-height:1.45\">
+          El mapa de abajo te ayuda a ver dónde cae cada gasolinera respecto al trayecto.
+          La decisión principal se mantiene por precio, comodidad de ruta y datos actualizados.
+        </p>
+        <div class=\"station-card recommended\">
+          <div class=\"station-top\"><span class=\"badge\">MEJOR PARADA</span><span class=\"station-price\">{html.escape(format_price_label(recommended.get('price')))}</span></div>
+          <h3>{html.escape(str(recommended.get('station_name') or 'N/D'))}</h3>
+          <p>{html.escape(str(recommended.get('address') or ''))}<br>{html.escape(str(recommended.get('municipality') or ''))}</p>
+          <small>Actualizado: {html.escape(str(recommended.get('official_timestamp') or 'N/D'))}</small>
+        </div>
+        <p class=\"note\">Toca un marcador del mapa para ver precio, hora de actualización y fuente.</p>
+      </div>
+    </section>
+
+    <section class=\"map-wrap\">
+      <div class=\"map-head\">
+        <h2>Mapa visual con estaciones y precios</h2>
+        <span class=\"distance\" id=\"mapDistance\">Distancia orientativa pendiente</span>
+      </div>
+      <div id=\"map\"></div>
+    </section>
+
+    <section class=\"actions\">
+      <h2>Rutas disponibles</h2>
+      <div class=\"links\">
+        <a href=\"{google_recommended_link}\" target=\"_blank\">Google Maps · recomendada</a>
+        <a class=\"secondary\" href=\"{google_all_link}\" target=\"_blank\">Google Maps · con alternativas</a>
+        <a class=\"apple\" href=\"{apple_link}\" target=\"_blank\">Apple Maps · estación</a>
+      </div>
+      <p class=\"note\">Mapa orientativo: para navegación real usa Google Maps o Apple Maps. El tráfico puede variar la ruta final.</p>
+    </section>
+  </main>
+
 <script>
 const markers = {markers_json};
 const origin = {origin_json};
@@ -669,20 +786,53 @@ L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
   attribution: '&copy; OpenStreetMap'
 }}).addTo(map);
 const bounds = [];
-function addPoint(lat, lon, label, popup, color) {{
+const routePoints = [];
+function haversine(a,b,c,d) {{
+  const R=6371; const toRad=x=>x*Math.PI/180;
+  const dLat=toRad(c-a), dLon=toRad(d-b);
+  const s=Math.sin(dLat/2)**2+Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}}
+function addPoint(lat, lon, popup, color, radius=8) {{
   if (lat == null || lon == null) return;
   bounds.push([lat, lon]);
-  L.circleMarker([lat, lon], {{ radius: 8, color, fillColor: color, fillOpacity: 0.85 }}).addTo(map).bindPopup(popup);
+  routePoints.push([lat, lon]);
+  L.circleMarker([lat, lon], {{ radius, color, fillColor: color, fillOpacity: 0.88, weight: 3 }}).addTo(map).bindPopup(popup);
 }}
-addPoint(origin.lat, origin.lon, origin.name, '<b>Origen</b><br>' + origin.name, '#333');
-addPoint(destination.lat, destination.lon, destination.name, '<b>Destino</b><br>' + destination.name, '#333');
-markers.forEach((m, idx) => {{
-  const color = m.role === 'recommended' ? '#16803c' : '#d97706';
-  const badge = m.role === 'recommended' ? 'Recomendada' : 'Alternativa';
-  const popup = `<span class="badge">${{badge}}</span><br><b>${{m.name || ''}}</b><br>${{m.address || ''}}<br><span class="price">${{m.price_label || ''}}</span><br>Actualizado: ${{m.updated_at || 'N/D'}}<br>Fuente: ${{m.source || 'N/D'}}`;
-  addPoint(m.lat, m.lon, m.name, popup, color);
+const recommended = markers.find(m => m.role === 'recommended') || markers[0];
+document.getElementById('originName').textContent = origin.name || 'Origen';
+document.getElementById('destinationName').textContent = destination.name || 'Destino';
+if (recommended) {{
+  document.getElementById('recommendedNode').textContent = recommended.name || 'Repostaje';
+  document.getElementById('recommendedPrice').textContent = recommended.price_label || '';
+}}
+addPoint(origin.lat, origin.lon, '<b>Origen</b><br>' + (origin.name || ''), '#111827', 7);
+if (recommended) {{
+  const popup = `<span class=\"badge\">Recomendada</span><br><b>${{recommended.name || ''}}</b><br>${{recommended.address || ''}}<br><span class=\"price\">${{recommended.price_label || ''}}</span><br>Actualizado: ${{recommended.updated_at || 'N/D'}}<br>Fuente: ${{recommended.source || 'N/D'}}`;
+  addPoint(recommended.lat, recommended.lon, popup, '#16803c', 10);
+}}
+addPoint(destination.lat, destination.lon, '<b>Destino</b><br>' + (destination.name || ''), '#111827', 7);
+markers.forEach((m) => {{
+  if (recommended && m.station_key === recommended.station_key) return;
+  const popup = `<span class=\"badge\" style=\"background:#d97706\">Alternativa</span><br><b>${{m.name || ''}}</b><br>${{m.address || ''}}<br><span class=\"price\">${{m.price_label || ''}}</span><br>Actualizado: ${{m.updated_at || 'N/D'}}<br>Fuente: ${{m.source || 'N/D'}}`;
+  addPoint(m.lat, m.lon, popup, '#d97706', 8);
 }});
-if (bounds.length) {{ map.fitBounds(bounds, {{ padding: [30, 30] }}); }} else {{ map.setView([40.5, -3.3], 11); }}
+if (routePoints.length >= 2) {{
+  L.polyline(routePoints.slice(0,3), {{color:'#2563eb', weight:4, opacity:.75, dashArray:'8,8'}}).addTo(map);
+}}
+if (bounds.length) {{ map.fitBounds(bounds, {{ padding: [35, 35] }}); }} else {{ map.setView([40.5, -3.3], 11); }}
+let distText = 'Distancia orientativa';
+if (origin.lat && origin.lon && destination.lat && destination.lon) {{
+  let d = 0;
+  if (recommended && recommended.lat && recommended.lon) {{
+    d = haversine(origin.lat, origin.lon, recommended.lat, recommended.lon) + haversine(recommended.lat, recommended.lon, destination.lat, destination.lon);
+  }} else {{
+    d = haversine(origin.lat, origin.lon, destination.lat, destination.lon);
+  }}
+  distText = '≈ ' + d.toFixed(1).replace('.', ',') + ' km orientativos';
+}}
+document.getElementById('routeDistance').textContent = distText;
+document.getElementById('mapDistance').textContent = distText;
 </script>
 </body>
 </html>
