@@ -1,0 +1,115 @@
+{
+  "official_endpoint": "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/",
+  "fuel_field": "Precio Gasolina 95 E5",
+  "calendar_ics_urls": {
+    "personal_trabajo": "",
+    "forus": ""
+  },
+  "stations": [
+    {
+      "key": "alcampo_dehesa",
+      "brand_contains": [
+        "ALCAMPO"
+      ],
+      "name_contains": [
+        "ALCAMPO"
+      ],
+      "address_contains": [
+        "DEHESA",
+        "AUTOVIA",
+        "MADRID-BARCELONA"
+      ],
+      "municipality": "ALCALA DE HENARES",
+      "route_tags": [
+        "forus",
+        "alcala"
+      ],
+      "trust_note": "Cautela: comprobación presencial previa 1.399 €/l."
+    },
+    {
+      "key": "ballenoil_daganzo",
+      "brand_contains": [
+        "BALLENOIL"
+      ],
+      "address_contains": [
+        "DAGANZO"
+      ],
+      "municipality": "ALCALA DE HENARES",
+      "route_tags": [
+        "forus",
+        "alcala"
+      ]
+    },
+    {
+      "key": "gasexpress_daganzo",
+      "brand_contains": [
+        "GASEXPRESS",
+        "GAS EXPRESS"
+      ],
+      "address_contains": [
+        "DAGANZO"
+      ],
+      "municipality": "ALCALA DE HENARES",
+      "route_tags": [
+        "forus",
+        "alcala"
+      ]
+    },
+    {
+      "key": "ballenoil_cabanillas",
+      "brand_contains": [
+        "BALLENOIL"
+      ],
+      "address_contains": [
+        "COMERCIO"
+      ],
+      "municipality": "CABANILLAS DEL CAMPO",
+      "route_tags": [
+        "cabanillas"
+      ]
+    },
+    {
+      "key": "family_energy_azuqueca",
+      "brand_contains": [
+        "FAMILY",
+        "FAMILY ENERGY"
+      ],
+      "address_contains": [
+        "INDUSTRIA"
+      ],
+      "municipality": "AZUQUECA DE HENARES",
+      "route_tags": [
+        "cabanillas_return"
+      ],
+      "trust_note": "Buena solo Cabanillas -> Anchuelo; mala opción para Forus salvo paso por A-2/Azuqueca."
+    },
+    {
+      "key": "ballenoil_varsovia",
+      "brand_contains": [
+        "BALLENOIL"
+      ],
+      "address_contains": [
+        "VARSOVIA",
+        "VIA COMPLUTENSE"
+      ],
+      "municipality": "ALCALA DE HENARES",
+      "route_tags": [
+        "forus",
+        "alcala"
+      ],
+      "trust_note": "Confirmada presencialmente como opción fuerte para Forus <-> Anchuelo."
+    }
+  ],
+  "route_rules": {
+    "weekday": [
+      "cabanillas_out",
+      "cabanillas_return",
+      "forus_out",
+      "forus_return"
+    ],
+    "weekend": [
+      "forus_out",
+      "forus_return"
+    ]
+  }
+}

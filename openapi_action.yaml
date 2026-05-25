@@ -1,0 +1,52 @@
+openapi: 3.1.0
+info:
+  title: Gasolina Christian API
+  version: 1.0.0
+servers:
+  - url: https://TU-DOMINIO-O-NGROK
+paths:
+  /prices:
+    get:
+      operationId: getFuelPrices
+      summary: Get relevant fuel prices from official Spanish fuel endpoint
+      parameters:
+        - name: save
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Relevant fuel stations and prices
+  /recommend:
+    get:
+      operationId: recommendFuelStation
+      summary: Recommend the best fuel station for a route segment
+      parameters:
+        - name: segment
+          in: query
+          schema:
+            type: string
+            enum: [auto, forus_return, forus_out, alcala, cabanillas_return]
+            default: auto
+      responses:
+        "200":
+          description: Recommended station and alternatives
+  /history/{station_key}:
+    get:
+      operationId: getStationHistory
+      summary: Get local history for a station
+      parameters:
+        - name: station_key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Station price history
