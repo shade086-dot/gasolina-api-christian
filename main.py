@@ -466,8 +466,8 @@ def extract_precioil_rows_dynamic(items: list[dict[str, Any]], segment: str) -> 
     endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
     route_points = route_corridor_points(segment)
     destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
-    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "3.0"))
-    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "4.0"))
+    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "5.0"))
+    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "6.0"))
 
     rows: list[dict[str, Any]] = []
     fetched_timestamp = datetime.now().isoformat(timespec="seconds")
@@ -653,6 +653,83 @@ def choose_best(rows: list[dict[str, Any]], segment: str) -> dict[str, Any]:
         "recommended": best,
         "alternatives": alternatives,
         "top_5_cheapest": top5,
+    }
+
+
+def next_segment_for(current_segment: str) -> str:
+    """Devuelve el siguiente trayecto a evaluar.
+
+    Se puede sobreescribir en Render con NEXT_SEGMENT_MAP como JSON, por ejemplo:
+    {"forus_out":"forus_return","forus_return":"cabanillas_return","cabanillas_return":"forus_out"}
+    """
+    default_map = {
+        "forus_out": "forus_return",
+        "forus_return": "forus_out",
+        "cabanillas_return": "forus_out",
+        "alcala": "forus_return",
+    }
+    raw = os.getenv("NEXT_SEGMENT_MAP", "").strip()
+    if raw:
+        try:
+            configured = json.loads(raw)
+            if isinstance(configured, dict):
+                value = configured.get(current_segment)
+                if isinstance(value, str) and value in ROUTE_ENDPOINTS:
+                    return value
+        except Exception:
+            pass
+    return default_map.get(current_segment, "forus_return")
+
+
+def wait_analysis(current_result: dict[str, Any], next_result: dict[str, Any]) -> dict[str, Any]:
+    current_best = current_result.get("recommended") if isinstance(current_result.get("recommended"), dict) else None
+    next_best = next_result.get("recommended") if isinstance(next_result.get("recommended"), dict) else None
+    threshold = float(os.environ.get("WAIT_MIN_SAVINGS_EUR_L", "0.02"))
+
+    if not current_best or not next_best:
+        return {
+            "should_wait": False,
+            "reason": "No hay datos suficientes para comparar el trayecto actual con el siguiente.",
+            "min_saving_threshold_eur_l": threshold,
+        }
+
+    current_price = current_best.get("price")
+    next_price = next_best.get("price")
+    if not isinstance(current_price, (int, float)) or not isinstance(next_price, (int, float)):
+        return {
+            "should_wait": False,
+            "reason": "No hay precio comparable en alguno de los dos trayectos.",
+            "min_saving_threshold_eur_l": threshold,
+        }
+
+    saving = round(float(current_price) - float(next_price), 3)
+    should_wait = saving >= threshold
+    if should_wait:
+        reason = f"Compensa esperar: el siguiente trayecto tiene una opción {saving:.3f} €/l más barata."
+    elif saving > 0:
+        reason = f"El siguiente trayecto es {saving:.3f} €/l más barato, pero no supera el umbral de {threshold:.3f} €/l."
+    elif saving == 0:
+        reason = "El mejor precio es igual en ambos trayectos; no hay ventaja clara por esperar."
+    else:
+        reason = f"No compensa esperar: el siguiente trayecto es {abs(saving):.3f} €/l más caro."
+
+    return {
+        "should_wait": should_wait,
+        "price_difference_current_minus_next_eur_l": saving,
+        "min_saving_threshold_eur_l": threshold,
+        "current_best": {
+            "station_name": current_best.get("station_name"),
+            "price": current_price,
+            "updated_at": current_best.get("official_timestamp"),
+            "address": current_best.get("address"),
+        },
+        "next_best": {
+            "station_name": next_best.get("station_name"),
+            "price": next_price,
+            "updated_at": next_best.get("official_timestamp"),
+            "address": next_best.get("address"),
+        },
+        "reason": reason,
     }
 
 
@@ -1692,6 +1769,47 @@ async def recommend(
             save_observations(rows)
             result = choose_best(rows, segment)
             items = payload.get("items", []) if isinstance(payload, dict) else precioil_station_items(payload)
+
+            # Si el usuario pide segment=auto, hacemos una doble evaluación:
+            # 1) trayecto actual, para decidir si repostar ahora;
+            # 2) siguiente trayecto, que es el que se devuelve con mapa/ruta.
+            if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
+                next_segment = next_segment_for(segment)
+                next_payload, next_rows = await fetch_precioil_relevant_rows(next_segment)
+                save_observations(next_rows)
+                next_result = choose_best(next_rows, next_segment)
+                next_items = next_payload.get("items", []) if isinstance(next_payload, dict) else precioil_station_items(next_payload)
+                comparison = wait_analysis(result, next_result)
+                return {
+                    "status": "ok",
+                    "source": "precioil",
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    "segment": next_segment,
+                    "current_segment": segment,
+                    "next_segment": next_segment,
+                    "analysis_mode": "dual_current_and_next",
+                    "decision": comparison,
+                    "current_route": {
+                        "segment": segment,
+                        "regions_used": precioil_regions_for_segment(segment),
+                        "precioil_matched_count": len(rows),
+                        "precioil_raw_items_count": len(items),
+                        "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
+                        "result": result,
+                    },
+                    "next_route": {
+                        "segment": next_segment,
+                        "regions_used": precioil_regions_for_segment(next_segment),
+                        "precioil_matched_count": len(next_rows),
+                        "precioil_raw_items_count": len(next_items),
+                        "region_errors": next_payload.get("region_errors", {}) if isinstance(next_payload, dict) else {},
+                        "result": next_result,
+                    },
+                    **next_result,
+                    "map": build_map_payload(next_segment, next_result),
+                    **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                }
+
             return {
                 "status": "ok",
                 "source": "precioil",
@@ -1703,6 +1821,7 @@ async def recommend(
                 "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
                 **result,
                 "map": build_map_payload(segment, result),
+                **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
             }
         except HTTPException as e:
             precioil_error = e.detail
@@ -1774,7 +1893,10 @@ async def map_image(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
 ) -> Response:
+    requested_segment = segment
     segment = await resolve_auto_segment(segment)
+    if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
+        segment = next_segment_for(segment)
 
     try:
         if source in ("precioil", "auto"):
@@ -1799,7 +1921,10 @@ async def map_view(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
 ) -> HTMLResponse:
+    requested_segment = segment
     segment = await resolve_auto_segment(segment)
+    if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
+        segment = next_segment_for(segment)
 
     try:
         if source in ("precioil", "auto"):
