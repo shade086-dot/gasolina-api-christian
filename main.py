@@ -58,34 +58,42 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://gasolina-api-christ
 # Las coordenadas exactas de las gasolineras vienen de Precioil.
 ROUTE_ENDPOINTS = {
     "cabanillas_return": {
-        "origin_name": "DSV / Cabanillas del Campo",
+        "origin_name": "DSV / Cabanillas del Campo · Av. de la Veguilla 7",
+        "origin_address": "Avenida de la Veguilla 7, 19171 Cabanillas del Campo, Guadalajara",
         "origin_lat": 40.6302,
         "origin_lon": -3.2357,
-        "destination_name": "Anchuelo",
+        "destination_name": "Casa · C/ Almendros 6, Anchuelo",
+        "destination_address": "Calle Almendros 6, 28818 Anchuelo, Madrid",
         "destination_lat": 40.4667,
         "destination_lon": -3.2687,
     },
     "forus_return": {
         "origin_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "origin_address": "Calle Belvís del Jarama 8, 28806 Alcalá de Henares, Madrid",
         "origin_lat": 40.4923,
         "origin_lon": -3.36153,
-        "destination_name": "Anchuelo",
+        "destination_name": "Casa · C/ Almendros 6, Anchuelo",
+        "destination_address": "Calle Almendros 6, 28818 Anchuelo, Madrid",
         "destination_lat": 40.4667,
         "destination_lon": -3.2687,
     },
     "forus_out": {
-        "origin_name": "Anchuelo",
+        "origin_name": "Casa · C/ Almendros 6, Anchuelo",
+        "origin_address": "Calle Almendros 6, 28818 Anchuelo, Madrid",
         "origin_lat": 40.4667,
         "origin_lon": -3.2687,
         "destination_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "destination_address": "Calle Belvís del Jarama 8, 28806 Alcalá de Henares, Madrid",
         "destination_lat": 40.4923,
         "destination_lon": -3.36153,
     },
     "alcala": {
         "origin_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "origin_address": "Calle Belvís del Jarama 8, 28806 Alcalá de Henares, Madrid",
         "origin_lat": 40.4923,
         "origin_lon": -3.36153,
-        "destination_name": "Anchuelo",
+        "destination_name": "Casa · C/ Almendros 6, Anchuelo",
+        "destination_address": "Calle Almendros 6, 28818 Anchuelo, Madrid",
         "destination_lat": 40.4667,
         "destination_lon": -3.2687,
     },
@@ -582,18 +590,37 @@ def apple_maps_place_link(row: dict[str, Any]) -> str:
     return f"https://maps.apple.com/?q={quote_plus(label)}"
 
 
+def endpoint_origin_text(endpoint: dict[str, Any]) -> str:
+    return str(endpoint.get("origin_address") or endpoint.get("origin_name") or coord_text(endpoint["origin_lat"], endpoint["origin_lon"]))
+
+
+def endpoint_destination_text(endpoint: dict[str, Any]) -> str:
+    return str(endpoint.get("destination_address") or endpoint.get("destination_name") or coord_text(endpoint["destination_lat"], endpoint["destination_lon"]))
+
+
+def station_destination_text(station: dict[str, Any]) -> str:
+    lat, lon = station_lat_lon(station)
+    if lat is not None and lon is not None:
+        return coord_text(lat, lon)
+    name = str(station.get("station_name") or "")
+    address = str(station.get("address") or "")
+    municipality = str(station.get("municipality") or "")
+    return " ".join(x for x in [name, address, municipality] if x).strip()
+
+
 def build_google_directions(origin: dict[str, Any], destination: dict[str, Any], waypoints: list[dict[str, Any]]) -> str:
-    origin_coord = coord_text(origin["origin_lat"], origin["origin_lon"])
-    destination_coord = coord_text(destination["destination_lat"], destination["destination_lon"])
+    # Para navegación real usamos direcciones postales, no solo coordenadas aproximadas.
+    origin_text = endpoint_origin_text(origin)
+    destination_text = endpoint_destination_text(destination)
     waypoint_coords = []
     for station in waypoints:
-        lat, lon = station_lat_lon(station)
-        if lat is not None and lon is not None:
-            waypoint_coords.append(coord_text(lat, lon))
+        waypoint = station_destination_text(station)
+        if waypoint:
+            waypoint_coords.append(waypoint)
     params = {
         "api": "1",
-        "origin": origin_coord,
-        "destination": destination_coord,
+        "origin": origin_text,
+        "destination": destination_text,
         "travelmode": "driving",
     }
     if waypoint_coords:
@@ -602,14 +629,13 @@ def build_google_directions(origin: dict[str, Any], destination: dict[str, Any],
 
 
 def build_apple_directions(origin: dict[str, Any], station: Optional[dict[str, Any]] = None) -> str:
-    saddr = coord_text(origin["origin_lat"], origin["origin_lon"])
+    # Apple Maps no soporta waypoints de forma fiable en URL; este enlace lleva directo a la gasolinera recomendada.
+    saddr = endpoint_origin_text(origin)
     if station:
-        lat, lon = station_lat_lon(station)
-        daddr = coord_text(lat, lon) if lat is not None and lon is not None else str(station.get("address") or station.get("station_name"))
+        daddr = station_destination_text(station)
     else:
-        daddr = coord_text(origin["destination_lat"], origin["destination_lon"])
+        daddr = endpoint_destination_text(origin)
     return f"https://maps.apple.com/?saddr={quote_plus(saddr)}&daddr={quote_plus(daddr)}&dirflg=d"
-
 
 ROUTE_ROAD_HINTS = {
     "forus_out": [
@@ -776,22 +802,27 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
     stations = ([recommended] if recommended else []) + alternatives
     markers = [map_marker_from_station(station, "recommended" if idx == 0 else "alternative") for idx, station in enumerate(stations)]
     valid_stations = [station for station in stations if station_lat_lon(station)[0] is not None]
+    apple_route = build_apple_directions(endpoint, recommended) if recommended else build_apple_directions(endpoint)
+    recommended_name = recommended.get("station_name") if recommended else "N/D"
+    recommended_price = recommended.get("price") if recommended else None
     return {
         "type": "visual_map_links",
-        "note": "Mapa visual orientativo. Los precios se muestran en los marcadores/popup y en el informe; la ruta exacta puede variar según navegación/tráfico.",
+        "note": "Informe breve con mapa interactivo y ruta directa a Apple Maps. La ruta del mapa es visual; Google/Apple calculan la navegación real con las direcciones exactas.",
+        "summary": f"{endpoint['origin_name']} → {endpoint['destination_name']} · Recomendada: {recommended_name}" + (f" ({recommended_price:.3f} €/l)" if isinstance(recommended_price, (int, float)) else ""),
         "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
-        "image_url": f"{PUBLIC_BASE_URL}/map-image?segment={quote_plus(segment)}",
-        "preview_image_url": f"{PUBLIC_BASE_URL}/map-image?segment={quote_plus(segment)}",
+        "apple_maps_route": apple_route,
+        "apple_maps_recommended_route": apple_route,
         "google_maps_recommended_route": build_google_directions(endpoint, endpoint, valid_stations[:1]),
         "google_maps_all_candidates_route": build_google_directions(endpoint, endpoint, valid_stations),
-        "apple_maps_recommended_station": build_apple_directions(endpoint, recommended) if recommended else build_apple_directions(endpoint),
         "origin": {
             "name": endpoint["origin_name"],
+            "address": endpoint.get("origin_address"),
             "lat": endpoint["origin_lat"],
             "lon": endpoint["origin_lon"],
         },
         "destination": {
             "name": endpoint["destination_name"],
+            "address": endpoint.get("destination_address"),
             "lat": endpoint["destination_lat"],
             "lon": endpoint["destination_lon"],
         },
@@ -811,7 +842,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     subtitle = f"{map_payload.get('origin', {}).get('name', 'Origen')} → {map_payload.get('destination', {}).get('name', 'Destino')}"
     google_recommended_link = html.escape(map_payload.get("google_maps_recommended_route", ""))
     google_all_link = html.escape(map_payload.get("google_maps_all_candidates_route", ""))
-    apple_link = html.escape(map_payload.get("apple_maps_recommended_station", ""))
+    apple_link = html.escape(map_payload.get("apple_maps_route") or map_payload.get("apple_maps_recommended_station", ""))
 
     def station_card(row: dict[str, Any], role: str) -> str:
         if not row:
