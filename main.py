@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote_plus, urlencode, urlparse, parse_qs, unquote
 import html
+import math
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
@@ -390,6 +391,134 @@ def extract_price_95_from_precioil(row: dict[str, Any]) -> Optional[float]:
     return None
 
 
+
+def row_lat_lon(row: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    lat = first_present(row, ["latitud", "lat", "latitude"])
+    lon = first_present(row, ["longitud", "lon", "lng", "longitude"])
+    try:
+        return float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None, None
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0088
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radius_km * math.asin(math.sqrt(a))
+
+
+def _equirect_xy(lat: float, lon: float, ref_lat: float, ref_lon: float) -> tuple[float, float]:
+    # Coordenadas locales aproximadas en km, suficiente para filtros de pocos kilómetros.
+    x = math.radians(lon - ref_lon) * math.cos(math.radians(ref_lat)) * 6371.0088
+    y = math.radians(lat - ref_lat) * 6371.0088
+    return x, y
+
+
+def point_segment_distance_km(
+    point: tuple[float, float],
+    a: tuple[float, float],
+    b: tuple[float, float],
+) -> float:
+    lat, lon = point
+    ref_lat = (lat + a[0] + b[0]) / 3
+    ref_lon = (lon + a[1] + b[1]) / 3
+    px, py = _equirect_xy(lat, lon, ref_lat, ref_lon)
+    ax, ay = _equirect_xy(a[0], a[1], ref_lat, ref_lon)
+    bx, by = _equirect_xy(b[0], b[1], ref_lat, ref_lon)
+    dx = bx - ax
+    dy = by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    cx = ax + t * dx
+    cy = ay + t * dy
+    return math.hypot(px - cx, py - cy)
+
+
+def point_polyline_distance_km(point: tuple[float, float], points: list[tuple[float, float]]) -> float:
+    if len(points) < 2:
+        return float("inf")
+    return min(point_segment_distance_km(point, points[i], points[i + 1]) for i in range(len(points) - 1))
+
+
+def route_corridor_points(segment: str) -> list[tuple[float, float]]:
+    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    origin = (float(endpoint["origin_lat"]), float(endpoint["origin_lon"]))
+    destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
+
+    # Trazadas visuales aproximadas del corredor de carretera. No son navegación giro a giro:
+    # sirven para filtrar estaciones cercanas al trayecto y pintar el mapa sin líneas rectas raras.
+    if segment == "forus_out":
+        return [origin, (40.4687, -3.2820), (40.4768, -3.3140), (40.4865, -3.3440), destination]
+    if segment in ("forus_return", "alcala"):
+        return [origin, (40.4865, -3.3440), (40.4768, -3.3140), (40.4687, -3.2820), destination]
+    if segment == "cabanillas_return":
+        return [origin, (40.6040, -3.2500), (40.5600, -3.2550), (40.5150, -3.2700), destination]
+    return [origin, destination]
+
+
+def extract_precioil_rows_dynamic(items: list[dict[str, Any]], segment: str) -> list[dict[str, Any]]:
+    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    route_points = route_corridor_points(segment)
+    destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
+    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "3.0"))
+    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "4.0"))
+
+    rows: list[dict[str, Any]] = []
+    fetched_timestamp = datetime.now().isoformat(timespec="seconds")
+
+    for r in items:
+        price = extract_price_95_from_precioil(r)
+        lat, lon = row_lat_lon(r)
+        if price is None or lat is None or lon is None:
+            continue
+
+        route_distance = point_polyline_distance_km((lat, lon), route_points)
+        destination_distance = haversine_km(lat, lon, destination[0], destination[1])
+        if route_distance > route_max_km and destination_distance > destination_max_km:
+            continue
+
+        station_name = str(first_present(r, ["Rótulo", "Rotulo", "rotulo", "nombre", "Nombre", "marca", "Marca", "brand", "nombreEstacion"]) or "")
+        address = str(first_present(r, ["Dirección", "Direccion", "direccion", "address", "Address"]) or "")
+        municipality = str(first_present(r, ["Municipio", "municipio", "localidad", "Localidad", "city", "poblacion", "nombreMunicipio"]) or "")
+        updated_at = first_present(
+            r,
+            [
+                "lastUpdate",
+                "fecha_actualizacion",
+                "fechaActualizacion",
+                "updated_at",
+                "updatedAt",
+                "ultima_actualizacion",
+            ],
+        )
+        station_id = first_present(r, ["idEstacion", "id", "station_id", "codigo"])
+        station_key = f"precioil_{station_id}" if station_id is not None else norm(f"{station_name}_{address}")[:80]
+
+        row = {
+            "station_key": station_key,
+            "station_name": station_name,
+            "address": address,
+            "municipality": municipality,
+            "price": price,
+            "official_timestamp": str(updated_at or fetched_timestamp),
+            "route_tags": [segment, "near_route"],
+            "trust_note": f"Cerca del trayecto: {route_distance:.1f} km · cerca destino: {destination_distance:.1f} km",
+            "source": "precioil",
+            "distance_to_route_km": round(route_distance, 3),
+            "distance_to_destination_km": round(destination_distance, 3),
+            "raw": r,
+        }
+        rows.append(row)
+
+    return rows
+
+
 def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
     cfg = load_config()
     items = precioil_station_items(payload)
@@ -432,8 +561,10 @@ def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
 
 
 def precioil_regions_for_segment(segment: str = "all") -> list[str]:
+    # Se consultan áreas amplias y luego se filtra por cercanía real al trayecto/destino.
+    # Forus/Alcalá no necesita Cabanillas; Cabanillas sí combina corredor Cabanillas/Azuqueca + Alcalá.
     if segment == "cabanillas_return":
-        return ["cabanillas_azuqueca"]
+        return ["cabanillas_azuqueca", "alcala_daganzo"]
     if segment in ("forus_out", "forus_return", "alcala"):
         return ["alcala_daganzo"]
     return ["alcala_daganzo", "cabanillas_azuqueca"]
@@ -479,7 +610,7 @@ async def fetch_precioil_relevant_rows(segment: str = "all") -> tuple[Any, list[
             detail=f"Precioil no devolvió datos en ninguna zona: {region_errors}",
         )
 
-    rows = extract_relevant_rows_precioil(all_items)
+    rows = extract_precioil_rows_dynamic(all_items, segment)
     return {"items": all_items, "region_errors": region_errors}, rows
 
 
@@ -499,37 +630,30 @@ def save_observations(rows: list[dict[str, Any]]) -> None:
 
 
 def choose_best(rows: list[dict[str, Any]], segment: str) -> dict[str, Any]:
-    candidates = []
-    for r in rows:
-        tags = set(r.get("route_tags", []))
-        if segment == "cabanillas_return":
-            ok = "cabanillas_return" in tags or "cabanillas" in tags
-        elif segment in ("forus_out", "forus_return", "alcala"):
-            ok = "forus" in tags or "alcala" in tags
-        else:
-            ok = True
-
-        if ok and r.get("price") is not None:
-            candidates.append(r)
+    candidates = [r for r in rows if r.get("price") is not None]
 
     if not candidates:
-        return {"error": "No hay candidatos con precio para ese tramo.", "segment": segment}
+        return {"error": "No hay candidatos con precio cerca del trayecto o destino.", "segment": segment}
 
-    def score(r: dict[str, Any]) -> float:
-        p = float(r["price"])
-        key = r["station_key"]
-        penalty = 0.0
-        if key == "alcampo_dehesa":
-            penalty += 0.025
-        if key == "family_energy_azuqueca" and segment != "cabanillas_return":
-            penalty += 0.10
-        if key == "ballenoil_varsovia" and segment in ("forus_out", "forus_return", "alcala"):
-            penalty -= 0.005
-        return p + penalty
+    def score(r: dict[str, Any]) -> tuple[float, float, float]:
+        # Orden principal: precio. Desempate: más cerca del trayecto y después del destino.
+        price = float(r["price"])
+        route_distance = float(r.get("distance_to_route_km", 999.0) or 999.0)
+        destination_distance = float(r.get("distance_to_destination_km", 999.0) or 999.0)
+        return (price, route_distance, destination_distance)
 
-    best = sorted(candidates, key=score)[0]
-    alternatives = sorted(candidates, key=score)[1:4]
-    return {"segment": segment, "recommended": best, "alternatives": alternatives}
+    ordered = sorted(candidates, key=score)
+    top5 = ordered[:5]
+    best = top5[0]
+    alternatives = top5[1:]
+    return {
+        "segment": segment,
+        "selection_rule": "Estaciones cercanas al trayecto/destino; top 5 ordenadas por Gasolina 95 más barata.",
+        "nearby_candidates_count": len(candidates),
+        "recommended": best,
+        "alternatives": alternatives,
+        "top_5_cheapest": top5,
+    }
 
 
 def station_lat_lon(row: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
