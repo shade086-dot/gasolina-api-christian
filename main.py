@@ -4,7 +4,8 @@ import json
 import os
 import sqlite3
 import unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote_plus, urlencode
@@ -873,11 +874,242 @@ def manual_fallback(segment: str) -> dict[str, Any]:
     return fallback_by_segment.get(segment, fallback_by_segment["forus_return"])
 
 
-def resolve_auto_segment(segment: str) -> str:
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def split_env_list(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    return [item.strip() for item in raw.replace("\n", ",").split(",") if item.strip()]
+
+
+def local_tz() -> ZoneInfo:
+    return ZoneInfo(os.getenv("LOCAL_TZ", "Europe/Madrid"))
+
+
+def public_calendar_ics_urls() -> list[str]:
+    urls: list[str] = []
+    urls.extend(split_env_list("PUBLIC_CALENDAR_ICS_URLS"))
+    for key in (
+        "FORUS_CALENDAR_ICS_URL",
+        "PERSONAL_CALENDAR_ICS_URL",
+        "GOOGLE_FORUS_ICS_URL",
+        "GOOGLE_PERSONAL_ICS_URL",
+    ):
+        value = os.getenv(key, "").strip()
+        if value:
+            urls.append(value)
+
+    # Deduplica manteniendo orden.
+    seen: set[str] = set()
+    result: list[str] = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def ics_unescape(value: str) -> str:
+    return (
+        value.replace(r"\n", "\n")
+        .replace(r"\N", "\n")
+        .replace(r"\,", ",")
+        .replace(r"\;", ";")
+        .replace(r"\\", "\\")
+    )
+
+
+def unfold_ics_lines(text: str) -> list[str]:
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines: list[str] = []
+    for line in raw_lines:
+        if not line:
+            continue
+        if line.startswith((" ", "\t")) and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+    return lines
+
+
+def parse_ics_property(line: str) -> tuple[str, dict[str, str], str]:
+    left, _, value = line.partition(":")
+    parts = left.split(";")
+    name = parts[0].upper()
+    params: dict[str, str] = {}
+    for part in parts[1:]:
+        key, _, val = part.partition("=")
+        if key:
+            params[key.upper()] = val.strip('"')
+    return name, params, ics_unescape(value)
+
+
+def parse_ics_datetime(value: str, params: dict[str, str], tz: ZoneInfo) -> datetime | None:
+    try:
+        if params.get("VALUE", "").upper() == "DATE" or (len(value) == 8 and value.isdigit()):
+            d = datetime.strptime(value[:8], "%Y%m%d").date()
+            return datetime.combine(d, datetime.min.time(), tzinfo=tz)
+
+        if value.endswith("Z"):
+            return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+
+        parsed = datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
+        tzid = params.get("TZID")
+        event_tz = ZoneInfo(tzid) if tzid else tz
+        return parsed.replace(tzinfo=event_tz).astimezone(tz)
+    except Exception:
+        return None
+
+
+def parse_ics_events(text: str, calendar_name: str = "") -> list[dict[str, Any]]:
+    tz = local_tz()
+    events: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    for line in unfold_ics_lines(text):
+        if line == "BEGIN:VEVENT":
+            current = {"calendar": calendar_name}
+            continue
+        if line == "END:VEVENT":
+            if current and current.get("start"):
+                if not current.get("end"):
+                    current["end"] = current["start"]
+                events.append(current)
+            current = None
+            continue
+        if current is None:
+            continue
+
+        name, params, value = parse_ics_property(line)
+        if name == "SUMMARY":
+            current["summary"] = value
+        elif name == "LOCATION":
+            current["location"] = value
+        elif name == "DESCRIPTION":
+            current["description"] = value
+        elif name == "DTSTART":
+            current["start"] = parse_ics_datetime(value, params, tz)
+        elif name == "DTEND":
+            current["end"] = parse_ics_datetime(value, params, tz)
+
+    return events
+
+
+async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
+    urls = public_calendar_ics_urls()
+    if not urls:
+        return []
+
+    tz = local_tz()
+    today = datetime.now(tz).date()
+    start_day = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+    end_day = start_day + timedelta(days=1)
+
+    events: list[dict[str, Any]] = []
+    timeout = httpx.Timeout(12.0, connect=8.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for idx, url in enumerate(urls, start=1):
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                parsed = parse_ics_events(resp.text, calendar_name=f"ics_{idx}")
+                for event in parsed:
+                    event_start = event.get("start")
+                    event_end = event.get("end") or event_start
+                    if event_start and event_end and event_start < end_day and event_end >= start_day:
+                        events.append(event)
+            except Exception as exc:
+                print(f"[calendar] No se pudo leer ICS {idx}: {type(exc).__name__}: {exc}")
+
+    return sorted(events, key=lambda ev: ev.get("start") or datetime.max.replace(tzinfo=tz))
+
+
+def normalize_text(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value.casefold()
+
+
+def event_text(event: dict[str, Any]) -> str:
+    return normalize_text(
+        " ".join(
+            str(event.get(key, ""))
+            for key in ("summary", "location", "description", "calendar")
+        )
+    )
+
+
+def keyword_list(env_name: str, defaults: list[str]) -> list[str]:
+    configured = split_env_list(env_name)
+    return [normalize_text(item) for item in (configured or defaults)]
+
+
+def event_matches(event: dict[str, Any], keywords: list[str]) -> bool:
+    text = event_text(event)
+    return any(keyword and keyword in text for keyword in keywords)
+
+
+def classify_segment_from_calendar_events(events: list[dict[str, Any]]) -> str | None:
+    if not events:
+        return None
+
+    tz = local_tz()
+    now = datetime.now(tz)
+
+    forus_keywords = keyword_list("CAL_FORUS_KEYWORDS", ["forus", "gimnasio", "natacion", "natación", "padel", "pádel"])
+    cabanillas_keywords = keyword_list("CAL_CABANILLAS_KEYWORDS", ["cabanillas", "dsv", "guadalajara", "azuqueca"])
+    alcala_keywords = keyword_list("CAL_ALCALA_KEYWORDS", ["alcala", "alcalá", "alcala de henares", "alcalá de henares"])
+
+    forus_events = [event for event in events if event_matches(event, forus_keywords)]
+    cabanillas_events = [event for event in events if event_matches(event, cabanillas_keywords)]
+    alcala_events = [event for event in events if event_matches(event, alcala_keywords)]
+
+    # Si hay Forus pendiente hoy, lo normal es ir hacia Forus. Si ya empezó/terminó, toca vuelta.
+    upcoming_forus = [event for event in forus_events if (event.get("start") and event["start"] > now)]
+    if upcoming_forus:
+        upcoming_forus.sort(key=lambda ev: ev["start"])
+        return "forus_out"
+
+    past_or_current_forus = [
+        event for event in forus_events
+        if event.get("start") and event["start"] <= now
+    ]
+    if past_or_current_forus:
+        return "forus_return"
+
+    # Para Cabanillas solo existe segmento de vuelta configurado.
+    if cabanillas_events:
+        return "cabanillas_return"
+
+    if alcala_events:
+        return "alcala"
+
+    return None
+
+
+def fallback_auto_segment() -> str:
+    today = date.today()
+    return "forus_return" if today.weekday() < 5 else "alcala"
+
+
+async def resolve_auto_segment(segment: str) -> str:
     if segment != "auto":
         return segment
-    today = date.today()
-    return "forus_return" if today.weekday() < 5 else "forus_return"
+
+    if env_bool("PUBLIC_CALENDAR_ENABLED", True):
+        calendar_segment = classify_segment_from_calendar_events(
+            await fetch_public_calendar_events_for_today()
+        )
+        if calendar_segment:
+            return calendar_segment
+
+    return fallback_auto_segment()
 
 
 @app.get("/health")
@@ -972,7 +1204,7 @@ async def recommend(
 ) -> dict[str, Any]:
     # source: precioil | official | auto
     # Precioil queda como fuente principal. La oficial solo se usa si se pide explícitamente o como fallback en auto.
-    segment = resolve_auto_segment(segment)
+    segment = await resolve_auto_segment(segment)
     precioil_error: Any = None
 
     if source in ("precioil", "auto"):
@@ -1059,7 +1291,7 @@ async def map_view(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
 ) -> HTMLResponse:
-    segment = resolve_auto_segment(segment)
+    segment = await resolve_auto_segment(segment)
 
     try:
         if source in ("precioil", "auto"):
