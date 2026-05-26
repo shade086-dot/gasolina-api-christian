@@ -51,7 +51,7 @@ PRECIOIL_CABANILLAS_AZUQUECA_LAT = 40.6000
 PRECIOIL_CABANILLAS_AZUQUECA_LON = -3.2500
 
 # Precioil usa radio en km, no en metros.
-PRECIOIL_SEARCH_RADIUS_KM = 15
+PRECIOIL_SEARCH_RADIUS_KM = int(os.environ.get("PRECIOIL_SEARCH_RADIUS_KM", "20"))
 
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://gasolina-api-christian.onrender.com").rstrip("/")
 
@@ -466,8 +466,8 @@ def extract_precioil_rows_dynamic(items: list[dict[str, Any]], segment: str) -> 
     endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
     route_points = route_corridor_points(segment)
     destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
-    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "5.0"))
-    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "6.0"))
+    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "8.0"))
+    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "8.0"))
 
     rows: list[dict[str, Any]] = []
     fetched_timestamp = datetime.now().isoformat(timespec="seconds")
@@ -1181,7 +1181,7 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
     recommended_price = recommended.get("price") if recommended else None
     return {
         "type": "visual_map_links",
-        "note": "Informe breve con mapa interactivo y ruta directa a Apple Maps. La ruta del mapa es visual; Google/Apple calculan la navegación real con las direcciones exactas.",
+        "note": "Informe breve con mapa interactivo, ruta directa a Apple Maps y resumen meteorológico. La ruta del mapa es visual; Google/Apple calculan la navegación real con las direcciones exactas.",
         "summary": f"{endpoint['origin_name']} → {endpoint['destination_name']} · Recomendada: {recommended_name}" + (f" ({recommended_price:.3f} €/l)" if isinstance(recommended_price, (int, float)) else ""),
         "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
         "apple_maps_route": apple_route,
@@ -1206,7 +1206,260 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: dict[str, Any]) -> str:
+
+def weather_code_label(code: int | None) -> str:
+    labels = {
+        0: "cielo despejado",
+        1: "poco nuboso",
+        2: "nuboso parcial",
+        3: "cubierto",
+        45: "niebla",
+        48: "niebla con escarcha",
+        51: "llovizna débil",
+        53: "llovizna",
+        55: "llovizna intensa",
+        61: "lluvia débil",
+        63: "lluvia",
+        65: "lluvia fuerte",
+        71: "nieve débil",
+        73: "nieve",
+        75: "nieve fuerte",
+        80: "chubascos débiles",
+        81: "chubascos",
+        82: "chubascos fuertes",
+        95: "tormenta",
+        96: "tormenta con granizo",
+        99: "tormenta fuerte con granizo",
+    }
+    return labels.get(code, "tiempo variable")
+
+
+def segment_weather_title(segment: str) -> str:
+    if segment == "forus_out":
+        return "☀️ Ida a Forus"
+    if segment == "forus_return":
+        return "🌙 Regreso Forus → Anchuelo"
+    if segment == "cabanillas_return":
+        return "🏢 Vuelta DSV/Cabanillas → Anchuelo"
+    if segment == "alcala":
+        return "🏍️ Trayecto Alcalá"
+    return f"🏍️ Trayecto {segment}"
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _weather_emoji(code: int | None, precip_prob: float | None) -> str:
+    if code in (95, 96, 99):
+        return "⛈️"
+    if code in (61, 63, 65, 80, 81, 82) or (precip_prob is not None and precip_prob >= 45):
+        return "🌧️"
+    if code in (45, 48):
+        return "🌫️"
+    if code in (2, 3):
+        return "🌥️"
+    return "🌤️"
+
+
+async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[str, Any]:
+    """Resumen meteorológico ligero usando Open-Meteo, sin API key.
+
+    Se consulta el punto medio aproximado del trayecto para representar el corredor Henares/Anchuelo.
+    """
+    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_out"])
+    lat = (float(endpoint["origin_lat"]) + float(endpoint["destination_lat"])) / 2
+    lon = (float(endpoint["origin_lon"]) + float(endpoint["destination_lon"])) / 2
+    tz_name = os.environ.get("LOCAL_TZ", "Europe/Madrid")
+    target = at or datetime.now(ZoneInfo(tz_name))
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=ZoneInfo(tz_name))
+
+    params = {
+        "latitude": f"{lat:.5f}",
+        "longitude": f"{lon:.5f}",
+        "hourly": "temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,relative_humidity_2m",
+        "timezone": tz_name,
+        "forecast_days": "3",
+    }
+    url = "https://api.open-meteo.com/v1/forecast"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=True) as client:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+    hourly = data.get("hourly", {}) if isinstance(data, dict) else {}
+    times = hourly.get("time") or []
+    temps = hourly.get("temperature_2m") or []
+    pops = hourly.get("precipitation_probability") or []
+    precs = hourly.get("precipitation") or []
+    codes = hourly.get("weather_code") or []
+    winds = hourly.get("wind_speed_10m") or []
+    hums = hourly.get("relative_humidity_2m") or []
+
+    best_idx = 0
+    best_delta = None
+    for idx, raw_time in enumerate(times):
+        dt = _parse_iso_datetime(raw_time)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+        delta = abs((dt - target).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_idx = idx
+
+    def _get(seq: list[Any], idx: int) -> Any:
+        return seq[idx] if isinstance(seq, list) and 0 <= idx < len(seq) else None
+
+    temp = _get(temps, best_idx)
+    pop = _get(pops, best_idx)
+    precip = _get(precs, best_idx)
+    code = _get(codes, best_idx)
+    wind = _get(winds, best_idx)
+    humidity = _get(hums, best_idx)
+    forecast_time = _parse_iso_datetime(_get(times, best_idx))
+
+    return {
+        "segment": segment,
+        "at": target.isoformat(timespec="minutes"),
+        "forecast_time": forecast_time.isoformat(timespec="minutes") if forecast_time else None,
+        "temperature": temp,
+        "precipitation_probability": pop,
+        "precipitation": precip,
+        "weather_code": code,
+        "weather_label": weather_code_label(int(code)) if code is not None else "tiempo variable",
+        "wind_speed": wind,
+        "humidity": humidity,
+        "emoji": _weather_emoji(int(code) if code is not None else None, float(pop) if pop is not None else None),
+    }
+
+
+def _weather_bullets(weather: dict[str, Any]) -> list[str]:
+    temp = weather.get("temperature")
+    pop = weather.get("precipitation_probability")
+    precip = weather.get("precipitation")
+    wind = weather.get("wind_speed")
+    humidity = weather.get("humidity")
+    label = weather.get("weather_label") or "tiempo variable"
+
+    bullets: list[str] = []
+    bullets.append(f"{weather.get('emoji', '🌤️')} {str(label).capitalize()}.")
+    if isinstance(temp, (int, float)):
+        if temp >= 30:
+            bullets.append(f"🌡️ Temperatura alta: {temp:.0f} °C; sensación calurosa en ciudad y semáforos.")
+        elif temp >= 24:
+            bullets.append(f"🌡️ Ambiente templado-cálido: {temp:.0f} °C.")
+        elif temp >= 16:
+            bullets.append(f"🌡️ Temperatura agradable: {temp:.0f} °C.")
+        else:
+            bullets.append(f"🌡️ Fresco para moto: {temp:.0f} °C; conviene algo de abrigo.")
+    if isinstance(pop, (int, float)):
+        if pop >= 50 or (isinstance(precip, (int, float)) and precip > 0):
+            bullets.append(f"🌧️ Riesgo de lluvia relevante: {pop:.0f}%; revisa impermeable.")
+        elif pop >= 20:
+            bullets.append(f"🌦️ Probabilidad de lluvia baja-moderada: {pop:.0f}%.")
+        else:
+            bullets.append(f"🌧️ Probabilidad de lluvia muy baja: {pop:.0f}%.")
+    if isinstance(wind, (int, float)):
+        if wind >= 30:
+            bullets.append(f"💨 Viento notable: {wind:.0f} km/h; puede notarse en zonas abiertas.")
+        elif wind >= 18:
+            bullets.append(f"💨 Viento moderado: {wind:.0f} km/h.")
+        else:
+            bullets.append(f"💨 Viento flojo: {wind:.0f} km/h.")
+    if isinstance(humidity, (int, float)) and humidity >= 85:
+        bullets.append(f"🌫️ Humedad alta: {humidity:.0f}%; atención a posible sensación húmeda.")
+    return bullets[:5]
+
+
+def weather_panel_html_from_reports(
+    current_segment: str,
+    current_weather: dict[str, Any] | None,
+    next_segment: str | None,
+    next_weather: dict[str, Any] | None,
+    decision: dict[str, Any] | None = None,
+) -> str:
+    def block(title: str, weather: dict[str, Any] | None) -> str:
+        if not weather:
+            return f"""
+            <div class=\"weather-block\">
+              <h3>{html.escape(title)}</h3>
+              <p class=\"note\">No se pudo obtener la previsión ahora mismo.</p>
+            </div>
+            """
+        at_label = html.escape(str(weather.get("at") or ""))
+        bullets = "".join(f"<li>{html.escape(item)}</li>" for item in _weather_bullets(weather))
+        result = "✅ Buenas condiciones para moto."
+        pop = weather.get("precipitation_probability")
+        wind = weather.get("wind_speed")
+        temp = weather.get("temperature")
+        code = weather.get("weather_code")
+        if (isinstance(pop, (int, float)) and pop >= 45) or code in (61, 63, 65, 80, 81, 82, 95, 96, 99):
+            result = "⚠️ Llevar impermeable o revisar antes de salir."
+        elif isinstance(wind, (int, float)) and wind >= 30:
+            result = "⚠️ Ojo con viento en zonas abiertas."
+        elif isinstance(temp, (int, float)) and temp >= 30:
+            result = "🥵 Buenas condiciones, pero con calor."
+        return f"""
+        <div class=\"weather-block\">
+          <h3>{html.escape(title)}</h3>
+          <small>Referencia: {at_label}</small>
+          <ul>{bullets}</ul>
+          <p class=\"weather-result\">{html.escape(result)}</p>
+        </div>
+        """
+
+    current_title = segment_weather_title(current_segment)
+    next_title = segment_weather_title(next_segment) if next_segment else "Siguiente trayecto"
+
+    decision_text = ""
+    if isinstance(decision, dict) and decision.get("reason"):
+        decision_text = f"<p class=\"note\"><b>Gasolina:</b> {html.escape(str(decision.get('reason')))}</p>"
+
+    return f"""
+      <div class=\"croquis-title\"><h2>Tiempo para los trayectos</h2><span class=\"pill\">Moto</span></div>
+      <div class=\"weather-panel\">
+        {block(current_title, current_weather)}
+        {block(next_title, next_weather) if next_segment else ""}
+      </div>
+      {decision_text}
+    """
+
+
+async def build_weather_panel_html(
+    current_segment: str,
+    next_segment: str | None = None,
+    calendar_route_plan: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
+) -> str:
+    current_at = None
+    next_at = None
+    if isinstance(calendar_route_plan, dict):
+        current_at = _parse_iso_datetime((calendar_route_plan.get("current_occurrence") or {}).get("at"))
+        next_at = _parse_iso_datetime((calendar_route_plan.get("next_occurrence") or {}).get("at"))
+    try:
+        current_weather = await fetch_route_weather(current_segment, current_at)
+    except Exception as exc:
+        print(f"[weather] No se pudo obtener tiempo actual: {type(exc).__name__}: {exc}")
+        current_weather = None
+
+    next_weather = None
+    if next_segment:
+        try:
+            next_weather = await fetch_route_weather(next_segment, next_at)
+        except Exception as exc:
+            print(f"[weather] No se pudo obtener tiempo siguiente: {type(exc).__name__}: {exc}")
+
+    return weather_panel_html_from_reports(current_segment, current_weather, next_segment, next_weather, decision)
+
+def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: dict[str, Any], weather_panel_html: str | None = None) -> str:
     markers_json = json.dumps(map_payload.get("markers", []), ensure_ascii=False)
     origin_json = json.dumps(map_payload.get("origin", {}), ensure_ascii=False)
     destination_json = json.dumps(map_payload.get("destination", {}), ensure_ascii=False)
@@ -1218,6 +1471,11 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     google_recommended_link = html.escape(map_payload.get("google_maps_recommended_route", ""))
     google_all_link = html.escape(map_payload.get("google_maps_all_candidates_route", ""))
     apple_link = html.escape(map_payload.get("apple_maps_route") or map_payload.get("apple_maps_recommended_station", ""))
+    if weather_panel_html is None:
+        weather_panel_html = """
+        <div class=\"croquis-title\"><h2>Tiempo para los trayectos</h2><span class=\"pill\">Moto</span></div>
+        <p class=\"note\">Previsión no disponible en este momento.</p>
+        """
 
     def station_card(row: dict[str, Any], role: str) -> str:
         if not row:
@@ -1296,6 +1554,13 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     .links a.apple {{ background:#0f766e; }}
     .note {{ margin-top:10px; color:var(--muted); font-size:12px; }}
     .price {{ font-weight: 800; font-size: 16px; }}
+    .weather-panel {{ display:grid; grid-template-columns:1fr; gap:10px; }}
+    .weather-block {{ border:1px solid #dbe4ee; border-radius:15px; padding:12px; background:#f9fafb; }}
+    .weather-block h3 {{ margin:0 0 4px; font-size:16px; }}
+    .weather-block small {{ color:var(--muted); }}
+    .weather-block ul {{ margin:8px 0 0; padding-left:18px; color:var(--ink); font-size:13px; line-height:1.35; }}
+    .weather-block li {{ margin:4px 0; }}
+    .weather-result {{ margin:10px 0 0; font-weight:800; }}
     @media (max-width: 820px) {{
       .layout {{ grid-template-columns: 1fr; }}
       .route-line {{ grid-template-columns: 1fr; gap: 8px; }}
@@ -1330,18 +1595,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
       </div>
 
       <div class=\"croquis\">
-        <div class=\"croquis-title\"><h2>Resumen rápido</h2><span class=\"pill\">Ruta orientativa</span></div>
-        <p style=\"margin:0 0 10px;color:var(--muted);line-height:1.45\">
-          El mapa de abajo te ayuda a ver dónde cae cada gasolinera respecto al trayecto.
-          La decisión principal se mantiene por precio, comodidad de ruta y datos actualizados.
-        </p>
-        <div class=\"station-card recommended\">
-          <div class=\"station-top\"><span class=\"badge\">MEJOR PARADA</span><span class=\"station-price\">{html.escape(format_price_label(recommended.get('price')))}</span></div>
-          <h3>{html.escape(str(recommended.get('station_name') or 'N/D'))}</h3>
-          <p>{html.escape(str(recommended.get('address') or ''))}<br>{html.escape(str(recommended.get('municipality') or ''))}</p>
-          <small>Actualizado: {html.escape(str(recommended.get('official_timestamp') or 'N/D'))}</small>
-        </div>
-        <p class=\"note\">Toca un marcador del mapa para ver precio, hora de actualización y fuente.</p>
+        {weather_panel_html}
       </div>
     </section>
 
@@ -2075,8 +2329,6 @@ async def map_image(
 ) -> Response:
     requested_segment = segment
     segment = await resolve_auto_segment(segment)
-    if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
-        segment = next_segment_for(segment)
 
     try:
         if source in ("precioil", "auto"):
@@ -2103,8 +2355,6 @@ async def map_view(
 ) -> HTMLResponse:
     requested_segment = segment
     segment = await resolve_auto_segment(segment)
-    if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
-        segment = next_segment_for(segment)
 
     try:
         if source in ("precioil", "auto"):
@@ -2120,7 +2370,12 @@ async def map_view(
         result = {"recommended": manual_fallback(segment), "alternatives": []}
 
     map_payload = build_map_payload(segment, result)
-    return HTMLResponse(render_visual_map_html(segment, result, map_payload))
+    calendar_route_plan = await resolve_current_and_next_segments_from_calendar() if env_bool("PUBLIC_CALENDAR_ENABLED", True) else {}
+    next_segment = calendar_route_plan.get("next_segment") if isinstance(calendar_route_plan, dict) else None
+    if not isinstance(next_segment, str) or next_segment not in ROUTE_ENDPOINTS or next_segment == segment:
+        next_segment = next_segment_for(segment)
+    weather_panel = await build_weather_panel_html(segment, next_segment, calendar_route_plan)
+    return HTMLResponse(render_visual_map_html(segment, result, map_payload, weather_panel))
 
 @app.get("/history/{station_key}")
 def history(station_key: str, limit: int = 50) -> dict[str, Any]:
