@@ -46,6 +46,16 @@ DEFAULT_PUBLIC_CALENDAR_ICS_URLS = [
 PRECIOIL_ALCALA_LAT = 40.48198
 PRECIOIL_ALCALA_LON = -3.36354
 
+# Centros adicionales para que el radio ampliado de Precioil cubra mejor el corredor real.
+# Precioil suele devolver un número limitado de resultados por consulta, así que conviene
+# consultar varios centros y deduplicar después.
+PRECIOIL_ALCALA_FORJAS_LAT = 40.4923
+PRECIOIL_ALCALA_FORJAS_LON = -3.36153
+PRECIOIL_ANCHUELO_LAT = 40.4667
+PRECIOIL_ANCHUELO_LON = -3.2687
+PRECIOIL_ALCALA_ESTE_LAT = 40.4800
+PRECIOIL_ALCALA_ESTE_LON = -3.3200
+
 # Punto intermedio Cabanillas/Azuqueca: útil para DSV/Cabanillas -> Anchuelo.
 PRECIOIL_CABANILLAS_AZUQUECA_LAT = 40.6000
 PRECIOIL_CABANILLAS_AZUQUECA_LON = -3.2500
@@ -104,6 +114,21 @@ PRECIOIL_REGIONS = {
     "alcala_daganzo": {
         "latitud": PRECIOIL_ALCALA_LAT,
         "longitud": PRECIOIL_ALCALA_LON,
+        "radio": PRECIOIL_SEARCH_RADIUS_KM,
+    },
+    "alcala_forjas": {
+        "latitud": PRECIOIL_ALCALA_FORJAS_LAT,
+        "longitud": PRECIOIL_ALCALA_FORJAS_LON,
+        "radio": PRECIOIL_SEARCH_RADIUS_KM,
+    },
+    "anchuelo": {
+        "latitud": PRECIOIL_ANCHUELO_LAT,
+        "longitud": PRECIOIL_ANCHUELO_LON,
+        "radio": PRECIOIL_SEARCH_RADIUS_KM,
+    },
+    "alcala_este": {
+        "latitud": PRECIOIL_ALCALA_ESTE_LAT,
+        "longitud": PRECIOIL_ALCALA_ESTE_LON,
         "radio": PRECIOIL_SEARCH_RADIUS_KM,
     },
     "cabanillas_azuqueca": {
@@ -561,13 +586,19 @@ def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
 
 
 def precioil_regions_for_segment(segment: str = "all") -> list[str]:
-    # Se consultan áreas amplias y luego se filtra por cercanía real al trayecto/destino.
-    # Forus/Alcalá no necesita Cabanillas; Cabanillas sí combina corredor Cabanillas/Azuqueca + Alcalá.
-    if segment == "cabanillas_return":
-        return ["cabanillas_azuqueca", "alcala_daganzo"]
+    # Se consultan varias áreas amplias y luego se filtra por cercanía real al trayecto/destino.
+    # Importante: el radio ampliado solo ayuda si consultamos más de un centro, porque Precioil
+    # puede limitar el número de resultados por petición. Por eso dividimos el corredor en zonas.
+    forus_corridor = ["alcala_daganzo", "alcala_forjas", "alcala_este", "anchuelo"]
+    cabanillas_corridor = ["cabanillas_azuqueca", "alcala_este", "anchuelo", "alcala_daganzo"]
+
     if segment in ("forus_out", "forus_return", "alcala"):
-        return ["alcala_daganzo"]
-    return ["alcala_daganzo", "cabanillas_azuqueca"]
+        return forus_corridor
+    if segment == "cabanillas_return":
+        return cabanillas_corridor
+
+    # Modo diagnóstico o desconocido: cubrir todos los corredores conocidos.
+    return list(dict.fromkeys(forus_corridor + cabanillas_corridor))
 
 
 def dedupe_precioil_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1459,6 +1490,106 @@ async def build_weather_panel_html(
 
     return weather_panel_html_from_reports(current_segment, current_weather, next_segment, next_weather, decision)
 
+
+def _weather_practical_result(weather: dict[str, Any] | None) -> str:
+    if not weather:
+        return "Previsión no disponible ahora mismo."
+    pop = weather.get("precipitation_probability")
+    wind = weather.get("wind_speed")
+    temp = weather.get("temperature")
+    code = weather.get("weather_code")
+    if (isinstance(pop, (int, float)) and pop >= 45) or code in (61, 63, 65, 80, 81, 82, 95, 96, 99):
+        return "⚠️ Revisa impermeable antes de salir."
+    if isinstance(wind, (int, float)) and wind >= 30:
+        return "⚠️ Buenas condiciones, pero ojo con viento en zonas abiertas."
+    if isinstance(temp, (int, float)) and temp >= 30:
+        return "🥵 Buenas condiciones, pero con calor."
+    return "✅ Buenas condiciones para ir en moto."
+
+
+def weather_text_block(segment: str, weather: dict[str, Any] | None) -> dict[str, Any]:
+    title = segment_weather_title(segment)
+    if not weather:
+        return {
+            "segment": segment,
+            "title": title,
+            "at": None,
+            "bullets": ["Previsión no disponible ahora mismo."],
+            "result": "Previsión no disponible ahora mismo.",
+        }
+    return {
+        "segment": segment,
+        "title": title,
+        "at": weather.get("at"),
+        "forecast_time": weather.get("forecast_time"),
+        "temperature": weather.get("temperature"),
+        "precipitation_probability": weather.get("precipitation_probability"),
+        "wind_speed": weather.get("wind_speed"),
+        "humidity": weather.get("humidity"),
+        "weather_label": weather.get("weather_label"),
+        "bullets": _weather_bullets(weather),
+        "result": _weather_practical_result(weather),
+    }
+
+
+async def build_weather_summary_payload(
+    current_segment: str,
+    next_segment: str | None = None,
+    calendar_route_plan: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current_at = None
+    next_at = None
+    if isinstance(calendar_route_plan, dict):
+        current_at = _parse_iso_datetime((calendar_route_plan.get("current_occurrence") or {}).get("at"))
+        next_at = _parse_iso_datetime((calendar_route_plan.get("next_occurrence") or {}).get("at"))
+
+    current_weather = None
+    next_weather = None
+    try:
+        current_weather = await fetch_route_weather(current_segment, current_at)
+    except Exception as exc:
+        print(f"[weather] No se pudo obtener resumen actual: {type(exc).__name__}: {exc}")
+
+    if next_segment:
+        try:
+            next_weather = await fetch_route_weather(next_segment, next_at)
+        except Exception as exc:
+            print(f"[weather] No se pudo obtener resumen siguiente: {type(exc).__name__}: {exc}")
+
+    current_block = weather_text_block(current_segment, current_weather)
+    next_block = weather_text_block(next_segment, next_weather) if next_segment else None
+
+    lines: list[str] = []
+    lines.append("Trayectos previstos:")
+    current_endpoint = ROUTE_ENDPOINTS.get(current_segment, ROUTE_ENDPOINTS["forus_out"])
+    lines.append(f"🏍️ {current_endpoint['origin_name']} → {current_endpoint['destination_name']}")
+    if next_segment:
+        next_endpoint = ROUTE_ENDPOINTS.get(next_segment, ROUTE_ENDPOINTS["forus_return"])
+        lines.append(f"🏍️ {next_endpoint['origin_name']} → {next_endpoint['destination_name']}")
+
+    for block in [current_block, next_block]:
+        if not block:
+            continue
+        lines.append("")
+        lines.append(str(block["title"]))
+        for item in block.get("bullets", []):
+            lines.append(f"* {item}")
+        lines.append("")
+        lines.append("Resultado práctico")
+        lines.append(str(block.get("result") or ""))
+
+    if isinstance(decision, dict) and decision.get("reason"):
+        lines.append("")
+        lines.append("Gasolina")
+        lines.append(str(decision.get("reason")))
+
+    return {
+        "current": current_block,
+        "next": next_block,
+        "summary_text": "\n".join(lines),
+    }
+
 def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: dict[str, Any], weather_panel_html: str | None = None) -> str:
     markers_json = json.dumps(map_payload.get("markers", []), ensure_ascii=False)
     origin_json = json.dumps(map_payload.get("origin", {}), ensure_ascii=False)
@@ -2210,6 +2341,8 @@ async def recommend(
                 comparison = wait_analysis(result, next_result)
                 current_map = build_map_payload(segment, result)
                 next_map = build_map_payload(next_segment, next_result)
+                weather_summary = await build_weather_summary_payload(segment, next_segment, calendar_route_plan, comparison)
+                current_map["weather_summary"] = weather_summary
                 return {
                     "status": "ok",
                     "source": "precioil",
@@ -2221,6 +2354,7 @@ async def recommend(
                     "published_route": "current_segment",
                     "calendar_route_plan": calendar_route_plan,
                     "decision": comparison,
+                    "weather_summary": weather_summary,
                     "current_route": {
                         "segment": segment,
                         "regions_used": precioil_regions_for_segment(segment),
@@ -2255,6 +2389,7 @@ async def recommend(
                 "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
                 **result,
                 "map": build_map_payload(segment, result),
+                "weather_summary": await build_weather_summary_payload(segment),
                 **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
             }
         except HTTPException as e:
