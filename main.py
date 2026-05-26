@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urlparse, parse_qs, unquote
 import html
 
 import httpx
@@ -21,18 +21,19 @@ DB_PATH = APP_DIR / "gasolina_history.sqlite3"
 
 PRECIOIL_BASE_URL = "https://api.precioil.es"
 
-# Calendarios públicos ICS usados para resolver segment=auto.
+# Calendarios publicados usados para resolver segment=auto.
+# Acepta URLs ICS directas, webcal:// de iCloud y enlaces Google Calendar embed.
 # Se pueden sobreescribir en Render con:
 #   PUBLIC_CALENDAR_ICS_URLS
 #   FORUS_CALENDAR_ICS_URL
 #   PERSONAL_CALENDAR_ICS_URL
 DEFAULT_PERSONAL_CALENDAR_ICS_URL = (
-    "https://calendar.google.com/calendar/ical/"
-    "3nb1ihtbco4lla5s1s5o5mao24kj947e%40import.calendar.google.com/public/basic.ics"
+    "webcal://p118-caldav.icloud.com/published/2/"
+    "Mjg2NzY1MzA2Mjg2NzY1M94Qkr3iSV-Qf6LzFWxwtxWv823O3SNidOtaXorjQAgVCp4YD6inMHiLP07VtHQkWEyd5rLTtoIsaNsyJcvrrxA"
 )
 DEFAULT_FORUS_CALENDAR_ICS_URL = (
-    "https://calendar.google.com/calendar/ical/"
-    "jgp0bfn3vu2iacqjb08rec5t4pd9508i%40import.calendar.google.com/public/basic.ics"
+    "webcal://p118-caldav.icloud.com/published/2/"
+    "Mjg2NzY1MzA2Mjg2NzY1M94Qkr3iSV-Qf6LzFWxwtxXu7Jad9zu2kVc5XhgHE-fbckUoVxbrvBEPq0imCC7TWQl9R0T9cylIx3mPYrWOmmI"
 )
 DEFAULT_PUBLIC_CALENDAR_ICS_URLS = [
     DEFAULT_PERSONAL_CALENDAR_ICS_URL,
@@ -910,6 +911,27 @@ def local_tz() -> ZoneInfo:
     return ZoneInfo(os.getenv("LOCAL_TZ", "Europe/Madrid"))
 
 
+def normalize_calendar_feed_url(url: str) -> str:
+    """Convierte webcal:// y Google embed en una URL descargable por httpx."""
+    value = (url or "").strip()
+    if not value:
+        return ""
+
+    lowered = value.lower()
+    if lowered.startswith("webcal://"):
+        return "https://" + value[len("webcal://"):]
+
+    # Google Calendar embed: https://calendar.google.com/calendar/embed?src=...&ctz=...
+    # Solo funcionará si el calendario tiene ICS público. Los iCloud webcal son preferibles.
+    parsed = urlparse(value)
+    if "calendar.google.com" in parsed.netloc and parsed.path.rstrip("/") == "/calendar/embed":
+        src = parse_qs(parsed.query).get("src", [""])[0]
+        if src:
+            return "https://calendar.google.com/calendar/ical/" + quote_plus(unquote(src)) + "/public/basic.ics"
+
+    return value
+
+
 def public_calendar_ics_urls() -> list[str]:
     urls: list[str] = []
 
@@ -918,6 +940,10 @@ def public_calendar_ics_urls() -> list[str]:
     for key in (
         "FORUS_CALENDAR_ICS_URL",
         "PERSONAL_CALENDAR_ICS_URL",
+        "FORUS_CALENDAR_WEBCAL_URL",
+        "PERSONAL_CALENDAR_WEBCAL_URL",
+        "FORUS_CALENDAR_EMBED_URL",
+        "PERSONAL_CALENDAR_EMBED_URL",
         "GOOGLE_FORUS_ICS_URL",
         "GOOGLE_PERSONAL_ICS_URL",
     ):
@@ -925,15 +951,16 @@ def public_calendar_ics_urls() -> list[str]:
         if value:
             urls.append(value)
 
-    # 2) Valores por defecto: calendarios públicos indicados por Christian.
+    # 2) Valores por defecto: calendarios iCloud publicados indicados por Christian.
     if not urls:
         urls.extend(DEFAULT_PUBLIC_CALENDAR_ICS_URLS)
 
-    # Deduplica manteniendo orden.
+    # Normaliza y deduplica manteniendo orden.
     seen: set[str] = set()
     result: list[str] = []
-    for url in urls:
-        if url not in seen:
+    for raw_url in urls:
+        url = normalize_calendar_feed_url(raw_url)
+        if url and url not in seen:
             seen.add(url)
             result.append(url)
     return result
@@ -942,9 +969,9 @@ def public_calendar_ics_urls() -> list[str]:
 def calendar_name_from_url(url: str, index: int) -> str:
     lowered = url.lower()
 
-    if "jgp0bfn3vu2iacqjb08rec5t4pd9508i" in lowered:
+    if "jgp0bfn3vu2iacqjb08rec5t4pd9508i" in lowered or "fbckuovxbrvbepq0imcc7twql9r0t9cylix3mpyrwommi" in lowered:
         return "forus"
-    if "3nb1ihtbco4lla5s1s5o5mao24kj947e" in lowered:
+    if "3nb1ihtbco4lla5s1s5o5mao24kj947e" in lowered or "v823o3snidotaxorjqagvcp4yd6inmhilp07vthqkweyd5rlttoisansyjcvrrxa" in lowered:
         return "personal_trabajo"
 
     # Fallback por nombre de variable/URL cuando se sobreescriba en Render.
@@ -1042,10 +1069,10 @@ def parse_ics_events(text: str, calendar_name: str = "") -> list[dict[str, Any]]
     return events
 
 
-async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
+async def fetch_public_calendar_events_for_today_with_sources() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     urls = public_calendar_ics_urls()
     if not urls:
-        return []
+        return [], []
 
     tz = local_tz()
     today = datetime.now(tz).date()
@@ -1053,22 +1080,55 @@ async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
     end_day = start_day + timedelta(days=1)
 
     events: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
     timeout = httpx.Timeout(12.0, connect=8.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for idx, url in enumerate(urls, start=1):
+            parsed_url = urlparse(url)
+            source_debug: dict[str, Any] = {
+                "index": idx,
+                "calendar": calendar_name_from_url(url, idx),
+                "url_scheme": parsed_url.scheme,
+                "host": parsed_url.netloc,
+                "ok": False,
+                "status_code": None,
+                "raw_vevent_count": 0,
+                "parsed_events_count": 0,
+                "events_today_count": 0,
+                "error": None,
+            }
             try:
                 resp = await client.get(url)
+                source_debug["status_code"] = resp.status_code
                 resp.raise_for_status()
-                parsed = parse_ics_events(resp.text, calendar_name=calendar_name_from_url(url, idx))
+
+                raw_text = resp.text
+                source_debug["raw_vevent_count"] = raw_text.upper().count("BEGIN:VEVENT")
+                parsed = parse_ics_events(raw_text, calendar_name=calendar_name_from_url(url, idx))
+                source_debug["parsed_events_count"] = len(parsed)
+
+                source_today = 0
                 for event in parsed:
                     event_start = event.get("start")
                     event_end = event.get("end") or event_start
                     if event_start and event_end and event_start < end_day and event_end >= start_day:
                         events.append(event)
-            except Exception as exc:
-                print(f"[calendar] No se pudo leer ICS {idx}: {type(exc).__name__}: {exc}")
+                        source_today += 1
 
-    return sorted(events, key=lambda ev: ev.get("start") or datetime.max.replace(tzinfo=tz))
+                source_debug["events_today_count"] = source_today
+                source_debug["ok"] = True
+            except Exception as exc:
+                source_debug["error"] = f"{type(exc).__name__}: {exc}"
+                print(f"[calendar] No se pudo leer ICS {idx}: {type(exc).__name__}: {exc}")
+            finally:
+                sources.append(source_debug)
+
+    return sorted(events, key=lambda ev: ev.get("start") or datetime.max.replace(tzinfo=tz)), sources
+
+
+async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
+    events, _sources = await fetch_public_calendar_events_for_today_with_sources()
+    return events
 
 
 def serialize_calendar_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -1084,7 +1144,7 @@ def serialize_calendar_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 async def calendar_auto_debug() -> dict[str, Any]:
-    events = await fetch_public_calendar_events_for_today()
+    events, sources = await fetch_public_calendar_events_for_today_with_sources()
     calendar_segment = classify_segment_from_calendar_events(events)
     return {
         "enabled": env_bool("PUBLIC_CALENDAR_ENABLED", True),
@@ -1092,6 +1152,7 @@ async def calendar_auto_debug() -> dict[str, Any]:
         "events_today_count": len(events),
         "calendar_segment": calendar_segment,
         "fallback_segment": fallback_auto_segment(),
+        "sources": sources,
         "events_today": [serialize_calendar_event(event) for event in events[:20]],
     }
 
