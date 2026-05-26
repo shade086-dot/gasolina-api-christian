@@ -21,6 +21,24 @@ DB_PATH = APP_DIR / "gasolina_history.sqlite3"
 
 PRECIOIL_BASE_URL = "https://api.precioil.es"
 
+# Calendarios públicos ICS usados para resolver segment=auto.
+# Se pueden sobreescribir en Render con:
+#   PUBLIC_CALENDAR_ICS_URLS
+#   FORUS_CALENDAR_ICS_URL
+#   PERSONAL_CALENDAR_ICS_URL
+DEFAULT_PERSONAL_CALENDAR_ICS_URL = (
+    "https://calendar.google.com/calendar/ical/"
+    "3nb1ihtbco4lla5s1s5o5mao24kj947e%40import.calendar.google.com/public/basic.ics"
+)
+DEFAULT_FORUS_CALENDAR_ICS_URL = (
+    "https://calendar.google.com/calendar/ical/"
+    "jgp0bfn3vu2iacqjb08rec5t4pd9508i%40import.calendar.google.com/public/basic.ics"
+)
+DEFAULT_PUBLIC_CALENDAR_ICS_URLS = [
+    DEFAULT_PERSONAL_CALENDAR_ICS_URL,
+    DEFAULT_FORUS_CALENDAR_ICS_URL,
+]
+
 # Zonas de búsqueda Precioil.
 # Alcalá/Daganzo: útil para Forus -> Anchuelo y Anchuelo -> Forus.
 PRECIOIL_ALCALA_LAT = 40.48198
@@ -894,6 +912,8 @@ def local_tz() -> ZoneInfo:
 
 def public_calendar_ics_urls() -> list[str]:
     urls: list[str] = []
+
+    # 1) Variables de entorno, si existen.
     urls.extend(split_env_list("PUBLIC_CALENDAR_ICS_URLS"))
     for key in (
         "FORUS_CALENDAR_ICS_URL",
@@ -905,6 +925,10 @@ def public_calendar_ics_urls() -> list[str]:
         if value:
             urls.append(value)
 
+    # 2) Valores por defecto: calendarios públicos indicados por Christian.
+    if not urls:
+        urls.extend(DEFAULT_PUBLIC_CALENDAR_ICS_URLS)
+
     # Deduplica manteniendo orden.
     seen: set[str] = set()
     result: list[str] = []
@@ -913,6 +937,23 @@ def public_calendar_ics_urls() -> list[str]:
             seen.add(url)
             result.append(url)
     return result
+
+
+def calendar_name_from_url(url: str, index: int) -> str:
+    lowered = url.lower()
+
+    if "jgp0bfn3vu2iacqjb08rec5t4pd9508i" in lowered:
+        return "forus"
+    if "3nb1ihtbco4lla5s1s5o5mao24kj947e" in lowered:
+        return "personal_trabajo"
+
+    # Fallback por nombre de variable/URL cuando se sobreescriba en Render.
+    if "forus" in lowered:
+        return "forus"
+    if "personal" in lowered or "trabajo" in lowered or "work" in lowered:
+        return "personal_trabajo"
+
+    return f"ics_{index}"
 
 
 def ics_unescape(value: str) -> str:
@@ -1018,7 +1059,7 @@ async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
-                parsed = parse_ics_events(resp.text, calendar_name=f"ics_{idx}")
+                parsed = parse_ics_events(resp.text, calendar_name=calendar_name_from_url(url, idx))
                 for event in parsed:
                     event_start = event.get("start")
                     event_end = event.get("end") or event_start
@@ -1028,6 +1069,31 @@ async def fetch_public_calendar_events_for_today() -> list[dict[str, Any]]:
                 print(f"[calendar] No se pudo leer ICS {idx}: {type(exc).__name__}: {exc}")
 
     return sorted(events, key=lambda ev: ev.get("start") or datetime.max.replace(tzinfo=tz))
+
+
+def serialize_calendar_event(event: dict[str, Any]) -> dict[str, Any]:
+    start = event.get("start")
+    end = event.get("end")
+    return {
+        "calendar": event.get("calendar", ""),
+        "summary": event.get("summary", ""),
+        "location": event.get("location", ""),
+        "start": start.isoformat(timespec="minutes") if isinstance(start, datetime) else None,
+        "end": end.isoformat(timespec="minutes") if isinstance(end, datetime) else None,
+    }
+
+
+async def calendar_auto_debug() -> dict[str, Any]:
+    events = await fetch_public_calendar_events_for_today()
+    calendar_segment = classify_segment_from_calendar_events(events)
+    return {
+        "enabled": env_bool("PUBLIC_CALENDAR_ENABLED", True),
+        "urls_count": len(public_calendar_ics_urls()),
+        "events_today_count": len(events),
+        "calendar_segment": calendar_segment,
+        "fallback_segment": fallback_auto_segment(),
+        "events_today": [serialize_calendar_event(event) for event in events[:20]],
+    }
 
 
 def normalize_text(value: str) -> str:
@@ -1098,23 +1164,52 @@ def fallback_auto_segment() -> str:
     return "forus_return" if today.weekday() < 5 else "alcala"
 
 
-async def resolve_auto_segment(segment: str) -> str:
+async def resolve_auto_segment_info(segment: str) -> tuple[str, dict[str, Any] | None]:
     if segment != "auto":
-        return segment
+        return segment, None
+
+    debug: dict[str, Any] = {
+        "enabled": env_bool("PUBLIC_CALENDAR_ENABLED", True),
+        "urls_count": len(public_calendar_ics_urls()),
+        "events_today_count": 0,
+        "calendar_segment": None,
+        "fallback_segment": fallback_auto_segment(),
+        "decision_source": "fallback",
+    }
 
     if env_bool("PUBLIC_CALENDAR_ENABLED", True):
-        calendar_segment = classify_segment_from_calendar_events(
-            await fetch_public_calendar_events_for_today()
+        events = await fetch_public_calendar_events_for_today()
+        calendar_segment = classify_segment_from_calendar_events(events)
+        debug.update(
+            {
+                "events_today_count": len(events),
+                "calendar_segment": calendar_segment,
+                "events_today": [serialize_calendar_event(event) for event in events[:10]],
+            }
         )
         if calendar_segment:
-            return calendar_segment
+            debug["decision_source"] = "calendar"
+            return calendar_segment, debug
 
-    return fallback_auto_segment()
+    return fallback_auto_segment(), debug
+
+
+async def resolve_auto_segment(segment: str) -> str:
+    resolved_segment, _debug = await resolve_auto_segment_info(segment)
+    return resolved_segment
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/debug-calendar")
+async def debug_calendar() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        **(await calendar_auto_debug()),
+    }
 
 
 @app.get("/debug-precioil")
@@ -1159,6 +1254,7 @@ async def prices(
                 "status": "ok",
                 "source": "precioil",
                 "segment": segment,
+                **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                 "regions_used": precioil_regions_for_segment(segment),
                 "count": len(rows),
                 "stations": rows,
@@ -1204,7 +1300,8 @@ async def recommend(
 ) -> dict[str, Any]:
     # source: precioil | official | auto
     # Precioil queda como fuente principal. La oficial solo se usa si se pide explícitamente o como fallback en auto.
-    segment = await resolve_auto_segment(segment)
+    requested_segment = segment
+    segment, auto_debug = await resolve_auto_segment_info(segment)
     precioil_error: Any = None
 
     if source in ("precioil", "auto"):
@@ -1234,6 +1331,7 @@ async def recommend(
                     "precioil_error": precioil_error,
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
                     "segment": segment,
+                    **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "Precioil falló y la fuente oficial no se usó porque source=precioil.",
@@ -1253,6 +1351,7 @@ async def recommend(
                 "official_timestamp": payload.get("Fecha", ""),
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
                 "segment": segment,
+                **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                 **result,
                 "map": build_map_payload(segment, result),
             }
@@ -1264,6 +1363,7 @@ async def recommend(
                     "official_error": official_error.detail,
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
                     "segment": segment,
+                    **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "La fuente oficial falló y Precioil no se usó porque source=official.",
@@ -1277,6 +1377,7 @@ async def recommend(
                 "official_error": official_error.detail,
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
                 "segment": segment,
+                **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                 "recommended": manual_fallback(segment),
                 "alternatives": [],
                 "warning": "Fallaron Precioil y fuente oficial.",
