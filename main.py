@@ -13,7 +13,7 @@ import html
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
@@ -66,9 +66,9 @@ ROUTE_ENDPOINTS = {
         "destination_lon": -3.2687,
     },
     "forus_return": {
-        "origin_name": "Forus Alcalá Forjas",
-        "origin_lat": 40.4930,
-        "origin_lon": -3.3790,
+        "origin_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "origin_lat": 40.4923,
+        "origin_lon": -3.36153,
         "destination_name": "Anchuelo",
         "destination_lat": 40.4667,
         "destination_lon": -3.2687,
@@ -77,14 +77,14 @@ ROUTE_ENDPOINTS = {
         "origin_name": "Anchuelo",
         "origin_lat": 40.4667,
         "origin_lon": -3.2687,
-        "destination_name": "Forus Alcalá Forjas",
-        "destination_lat": 40.4930,
-        "destination_lon": -3.3790,
+        "destination_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "destination_lat": 40.4923,
+        "destination_lon": -3.36153,
     },
     "alcala": {
-        "origin_name": "Forus Alcalá Forjas",
-        "origin_lat": 40.4930,
-        "origin_lon": -3.3790,
+        "origin_name": "Forus Alcalá Forjas · C/ Belvís del Jarama 8",
+        "origin_lat": 40.4923,
+        "origin_lon": -3.36153,
         "destination_name": "Anchuelo",
         "destination_lat": 40.4667,
         "destination_lon": -3.2687,
@@ -104,7 +104,7 @@ PRECIOIL_REGIONS = {
     },
 }
 
-app = FastAPI(title="Gasolina Christian API", version="1.2.0")
+app = FastAPI(title="Gasolina Christian API", version="1.3.0")
 
 
 def load_config() -> dict[str, Any]:
@@ -611,6 +611,164 @@ def build_apple_directions(origin: dict[str, Any], station: Optional[dict[str, A
     return f"https://maps.apple.com/?saddr={quote_plus(saddr)}&daddr={quote_plus(daddr)}&dirflg=d"
 
 
+ROUTE_ROAD_HINTS = {
+    "forus_out": [
+        {"lat": 40.4687, "lon": -3.2820},
+        {"lat": 40.4768, "lon": -3.3140},
+        {"lat": 40.4865, "lon": -3.3440},
+    ],
+    "forus_return": [
+        {"lat": 40.4865, "lon": -3.3440},
+        {"lat": 40.4768, "lon": -3.3140},
+        {"lat": 40.4687, "lon": -3.2820},
+    ],
+    "alcala": [
+        {"lat": 40.4865, "lon": -3.3440},
+        {"lat": 40.4768, "lon": -3.3140},
+        {"lat": 40.4687, "lon": -3.2820},
+    ],
+    "cabanillas_return": [
+        {"lat": 40.6100, "lon": -3.2450},
+        {"lat": 40.5700, "lon": -3.2400},
+        {"lat": 40.5200, "lon": -3.2500},
+        {"lat": 40.4850, "lon": -3.2600},
+    ],
+}
+
+
+def _append_point(points: list[dict[str, Any]], lat: Any, lon: Any, label: str = "") -> None:
+    try:
+        flat = float(lat)
+        flon = float(lon)
+    except (TypeError, ValueError):
+        return
+    if points and abs(points[-1]["lat"] - flat) < 0.0002 and abs(points[-1]["lon"] - flon) < 0.0002:
+        return
+    points.append({"lat": flat, "lon": flon, "label": label})
+
+
+def build_visual_route_points(segment: str, endpoint: dict[str, Any], recommended: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    _append_point(points, endpoint.get("origin_lat"), endpoint.get("origin_lon"), "Origen")
+    hints = ROUTE_ROAD_HINTS.get(segment, [])
+    rec_lat, rec_lon = station_lat_lon(recommended) if recommended else (None, None)
+    if rec_lat is not None and rec_lon is not None:
+        for p in hints:
+            _append_point(points, p.get("lat"), p.get("lon"), "")
+        _append_point(points, rec_lat, rec_lon, "Repostaje")
+    else:
+        for p in hints:
+            _append_point(points, p.get("lat"), p.get("lon"), "")
+    _append_point(points, endpoint.get("destination_lat"), endpoint.get("destination_lon"), "Destino")
+    return points
+
+
+def _svg_escape(value: Any) -> str:
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def render_map_svg(segment: str, result: dict[str, Any], map_payload: dict[str, Any]) -> str:
+    width, height = 1200, 760
+    map_x, map_y, map_w, map_h = 40, 150, 720, 560
+    panel_x, panel_y, panel_w, panel_h = 790, 150, 370, 560
+    origin = map_payload.get("origin", {})
+    destination = map_payload.get("destination", {})
+    markers = map_payload.get("markers", [])
+    route_points = map_payload.get("route_points", [])
+    geo_points: list[tuple[float, float]] = []
+    for p in route_points:
+        try:
+            geo_points.append((float(p["lat"]), float(p["lon"])))
+        except Exception:
+            pass
+    for m in markers:
+        try:
+            geo_points.append((float(m["lat"]), float(m["lon"])))
+        except Exception:
+            pass
+    if not geo_points:
+        geo_points = [(40.48, -3.34), (40.50, -3.26)]
+    lats = [p[0] for p in geo_points]
+    lons = [p[1] for p in geo_points]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    pad_lat = max((max_lat - min_lat) * 0.18, 0.01)
+    pad_lon = max((max_lon - min_lon) * 0.18, 0.01)
+    min_lat -= pad_lat; max_lat += pad_lat; min_lon -= pad_lon; max_lon += pad_lon
+
+    def xy(lat: float, lon: float) -> tuple[float, float]:
+        x = map_x + (lon - min_lon) / (max_lon - min_lon) * map_w
+        y = map_y + (max_lat - lat) / (max_lat - min_lat) * map_h
+        return x, y
+
+    route_poly_parts = []
+    for p in route_points:
+        try:
+            x, y = xy(float(p["lat"]), float(p["lon"]))
+            route_poly_parts.append(f"{x:.1f},{y:.1f}")
+        except Exception:
+            pass
+    route_poly = " ".join(route_poly_parts)
+    recommended = result.get("recommended", {}) if isinstance(result.get("recommended"), dict) else {}
+    alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
+    rec_name = recommended.get("station_name") or recommended.get("station_key") or "N/D"
+    rec_price = format_price_label(recommended.get("price"))
+    rec_addr = recommended.get("address") or ""
+    rec_time = recommended.get("official_timestamp") or "N/D"
+    alt = alternatives[0] if alternatives else {}
+    alt_text = f"{alt.get('station_name') or 'Alternativa'} · {format_price_label(alt.get('price'))}" if alt else ""
+    marker_svg: list[str] = []
+
+    def add_marker(lat: Any, lon: Any, color: str, label: str, r: int = 10) -> None:
+        try:
+            x, y = xy(float(lat), float(lon))
+        except Exception:
+            return
+        marker_svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{color}" stroke="white" stroke-width="4"/>')
+        marker_svg.append(f'<text x="{x+14:.1f}" y="{y-12:.1f}" class="map-label">{_svg_escape(label)}</text>')
+
+    add_marker(origin.get("lat"), origin.get("lon"), "#111827", "Origen", 9)
+    for m in markers:
+        add_marker(m.get("lat"), m.get("lon"), "#15803d" if m.get("role") == "recommended" else "#d97706", m.get("name") or "", 12 if m.get("role") == "recommended" else 9)
+    add_marker(destination.get("lat"), destination.get("lon"), "#111827", "Destino", 9)
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <style>
+    .title {{ font: 800 34px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#111827; }}
+    .subtitle {{ font: 500 18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#4b5563; }}
+    .small {{ font: 500 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#6b7280; }}
+    .label {{ font: 700 17px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#111827; }}
+    .map-label {{ font: 800 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#111827; paint-order:stroke; stroke:#fff; stroke-width:4px; }}
+    .price {{ font: 900 46px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#15803d; }}
+    .card-title {{ font: 900 22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; fill:#111827; }}
+  </style>
+  <rect width="100%" height="100%" fill="#f3f6f8"/>
+  <rect x="28" y="24" width="1144" height="96" rx="24" fill="white" stroke="#dbe4ee"/>
+  <text x="54" y="66" class="title">Gasolina · {_svg_escape(segment)}</text>
+  <text x="54" y="98" class="subtitle">{_svg_escape(origin.get("name"))} → {_svg_escape(destination.get("name"))}</text>
+  <rect x="{map_x}" y="{map_y}" width="{map_w}" height="{map_h}" rx="24" fill="#e8f1ec" stroke="#cbd5e1"/>
+  <path d="M {map_x+40} {map_y+map_h-95} C {map_x+210} {map_y+map_h-165}, {map_x+390} {map_y+420}, {map_x+map_w-70} {map_y+360}" fill="none" stroke="#d7c9a8" stroke-width="36" stroke-linecap="round" opacity=".75"/>
+  <path d="M {map_x+80} {map_y+90} C {map_x+235} {map_y+155}, {map_x+365} {map_y+170}, {map_x+map_w-90} {map_y+70}" fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round" opacity=".85"/>
+  <path d="M {map_x+110} {map_y+map_h-70} C {map_x+275} {map_y+map_h-235}, {map_x+495} {map_y+map_h-170}, {map_x+map_w-110} {map_y+map_h-250}" fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round" opacity=".75"/>
+  <polyline points="{route_poly}" fill="none" stroke="#2563eb" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="16 12"/>
+  {''.join(marker_svg)}
+  <rect x="{panel_x}" y="{panel_y}" width="{panel_w}" height="{panel_h}" rx="24" fill="white" stroke="#dbe4ee"/>
+  <text x="{panel_x+28}" y="{panel_y+45}" class="card-title">Mejor parada</text>
+  <text x="{panel_x+28}" y="{panel_y+105}" class="price">{_svg_escape(rec_price)}</text>
+  <text x="{panel_x+28}" y="{panel_y+150}" class="card-title">{_svg_escape(rec_name)}</text>
+  <text x="{panel_x+28}" y="{panel_y+182}" class="small">{_svg_escape(rec_addr)}</text>
+  <text x="{panel_x+28}" y="{panel_y+212}" class="small">Actualizado: {_svg_escape(rec_time)}</text>
+  <rect x="{panel_x+24}" y="{panel_y+248}" width="{panel_w-48}" height="96" rx="18" fill="#ecfdf3" stroke="#15803d"/>
+  <text x="{panel_x+46}" y="{panel_y+286}" class="label">Recomendación</text>
+  <text x="{panel_x+46}" y="{panel_y+318}" class="small">Repostar en {_svg_escape(rec_name)}.</text>
+  <rect x="{panel_x+24}" y="{panel_y+372}" width="{panel_w-48}" height="96" rx="18" fill="#fff7ed" stroke="#d97706"/>
+  <text x="{panel_x+46}" y="{panel_y+410}" class="label">Alternativa</text>
+  <text x="{panel_x+46}" y="{panel_y+442}" class="small">{_svg_escape(alt_text or "Sin alternativa cercana")}</text>
+  <text x="{panel_x+28}" y="{panel_y+520}" class="small">Ruta dibujada de forma orientativa por carretera.</text>
+  <text x="{panel_x+28}" y="{panel_y+548}" class="small">Para navegación real: Google Maps / Apple Maps.</text>
+</svg>"""
+
+
 def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
     endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
     recommended = result.get("recommended") if isinstance(result.get("recommended"), dict) else None
@@ -622,6 +780,8 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
         "type": "visual_map_links",
         "note": "Mapa visual orientativo. Los precios se muestran en los marcadores/popup y en el informe; la ruta exacta puede variar según navegación/tráfico.",
         "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
+        "image_url": f"{PUBLIC_BASE_URL}/map-image?segment={quote_plus(segment)}",
+        "preview_image_url": f"{PUBLIC_BASE_URL}/map-image?segment={quote_plus(segment)}",
         "google_maps_recommended_route": build_google_directions(endpoint, endpoint, valid_stations[:1]),
         "google_maps_all_candidates_route": build_google_directions(endpoint, endpoint, valid_stations),
         "apple_maps_recommended_station": build_apple_directions(endpoint, recommended) if recommended else build_apple_directions(endpoint),
@@ -636,6 +796,7 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
             "lon": endpoint["destination_lon"],
         },
         "markers": markers,
+        "route_points": build_visual_route_points(segment, endpoint, recommended),
     }
 
 
@@ -643,6 +804,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     markers_json = json.dumps(map_payload.get("markers", []), ensure_ascii=False)
     origin_json = json.dumps(map_payload.get("origin", {}), ensure_ascii=False)
     destination_json = json.dumps(map_payload.get("destination", {}), ensure_ascii=False)
+    route_points_json = json.dumps(map_payload.get("route_points", []), ensure_ascii=False)
     recommended = result.get("recommended", {}) if isinstance(result.get("recommended"), dict) else {}
     alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
     title = f"Gasolina — {segment}"
@@ -800,6 +962,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
 const markers = {markers_json};
 const origin = {origin_json};
 const destination = {destination_json};
+const visualRoutePoints = {route_points_json};
 const map = L.map('map');
 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
   maxZoom: 19,
@@ -837,7 +1000,10 @@ markers.forEach((m) => {{
   const popup = `<span class=\"badge\" style=\"background:#d97706\">Alternativa</span><br><b>${{m.name || ''}}</b><br>${{m.address || ''}}<br><span class=\"price\">${{m.price_label || ''}}</span><br>Actualizado: ${{m.updated_at || 'N/D'}}<br>Fuente: ${{m.source || 'N/D'}}`;
   addPoint(m.lat, m.lon, popup, '#d97706', 8);
 }});
-if (routePoints.length >= 2) {{
+if (visualRoutePoints.length >= 2) {{
+  const visualLatLngs = visualRoutePoints.map(p => [p.lat, p.lon]).filter(p => p[0] != null && p[1] != null);
+  L.polyline(visualLatLngs, {{color:'#2563eb', weight:5, opacity:.78, dashArray:'10,10'}}).addTo(map);
+}} else if (routePoints.length >= 2) {{
   L.polyline(routePoints.slice(0,3), {{color:'#2563eb', weight:4, opacity:.75, dashArray:'8,8'}}).addTo(map);
 }}
 if (bounds.length) {{ map.fitBounds(bounds, {{ padding: [35, 35] }}); }} else {{ map.setView([40.5, -3.3], 11); }}
@@ -1446,6 +1612,31 @@ async def recommend(
             }
 
     raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
+
+
+@app.get("/map-image")
+async def map_image(
+    segment: str = Query(default="auto"),
+    source: str = Query(default="precioil"),
+) -> Response:
+    segment = await resolve_auto_segment(segment)
+
+    try:
+        if source in ("precioil", "auto"):
+            payload, rows = await fetch_precioil_relevant_rows(segment)
+            result = choose_best(rows, segment)
+        elif source == "official":
+            payload = await fetch_official_data()
+            rows = extract_relevant_rows(payload)
+            result = choose_best(rows, segment)
+        else:
+            raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
+    except HTTPException:
+        result = {"recommended": manual_fallback(segment), "alternatives": []}
+
+    map_payload = build_map_payload(segment, result)
+    svg = render_map_svg(segment, result, map_payload)
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @app.get("/map", response_class=HTMLResponse)
