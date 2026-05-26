@@ -656,11 +656,174 @@ def choose_best(rows: list[dict[str, Any]], segment: str) -> dict[str, Any]:
     }
 
 
-def next_segment_for(current_segment: str) -> str:
-    """Devuelve el siguiente trayecto a evaluar.
 
-    Se puede sobreescribir en Render con NEXT_SEGMENT_MAP como JSON, por ejemplo:
-    {"forus_out":"forus_return","forus_return":"cabanillas_return","cabanillas_return":"forus_out"}
+async def fetch_public_calendar_events_for_range(
+    start_at: datetime,
+    end_at: datetime,
+) -> list[dict[str, Any]]:
+    """Lee calendarios publicados y devuelve eventos que solapan con [start_at, end_at].
+
+    Se usa para calcular el siguiente trayecto real a partir de eventos futuros, no por mapeo fijo.
+    """
+    urls = public_calendar_ics_urls()
+    if not urls:
+        return []
+
+    events: list[dict[str, Any]] = []
+    timeout = httpx.Timeout(12.0, connect=8.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for idx, url in enumerate(urls, start=1):
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                parsed = parse_ics_events(resp.text, calendar_name=calendar_name_from_url(url, idx))
+                for event in parsed:
+                    event_start = event.get("start")
+                    event_end = event.get("end") or event_start
+                    if event_start and event_end and event_start < end_at and event_end >= start_at:
+                        events.append(event)
+            except Exception as exc:
+                print(f"[calendar] No se pudo leer próximos eventos ICS {idx}: {type(exc).__name__}: {exc}")
+
+    return sorted(events, key=lambda ev: ev.get("start") or datetime.max.replace(tzinfo=local_tz()))
+
+
+def route_occurrences_from_calendar_events(events: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Convierte eventos de calendario en trayectos fechados.
+
+    Ejemplos:
+    - Evento Forus futuro: start => forus_out, end => forus_return.
+    - Evento DSV/Cabanillas: end => cabanillas_return.
+    - Evento Alcalá genérico: start/end => alcala.
+    """
+    forus_keywords = keyword_list("CAL_FORUS_KEYWORDS", ["forus", "gimnasio", "natacion", "natación", "padel", "pádel", "zumba"])
+    cabanillas_keywords = keyword_list("CAL_CABANILLAS_KEYWORDS", ["cabanillas", "dsv", "guadalajara", "azuqueca", "oficina"])
+    alcala_keywords = keyword_list("CAL_ALCALA_KEYWORDS", ["alcala", "alcalá", "alcala de henares", "alcalá de henares"])
+
+    occurrences: list[dict[str, Any]] = []
+
+    for event in events:
+        start = event.get("start")
+        end = event.get("end") or start
+        if not isinstance(start, datetime):
+            continue
+        if not isinstance(end, datetime):
+            end = start
+
+        if event_matches(event, forus_keywords):
+            if start >= now:
+                occurrences.append(
+                    {
+                        "segment": "forus_out",
+                        "at": start,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Próximo evento Forus: ida",
+                    }
+                )
+            if end >= now:
+                occurrences.append(
+                    {
+                        "segment": "forus_return",
+                        "at": end,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Fin de evento Forus: vuelta",
+                    }
+                )
+            continue
+
+        if event_matches(event, cabanillas_keywords):
+            # Para Cabanillas tenemos configurado el retorno desde DSV/oficina.
+            when = end if end >= now else start
+            if when >= now:
+                occurrences.append(
+                    {
+                        "segment": "cabanillas_return",
+                        "at": when,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Evento DSV/Cabanillas: vuelta",
+                    }
+                )
+            continue
+
+        if event_matches(event, alcala_keywords):
+            when = start if start >= now else end
+            if when >= now:
+                occurrences.append(
+                    {
+                        "segment": "alcala",
+                        "at": when,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Evento en Alcalá",
+                    }
+                )
+
+    occurrences.sort(key=lambda item: item["at"])
+    return occurrences
+
+
+async def resolve_current_and_next_segments_from_calendar() -> dict[str, Any]:
+    """Resuelve trayecto actual y siguiente mirando próximos eventos reales del calendario."""
+    tz = local_tz()
+    now = datetime.now(tz)
+    horizon_days = int(os.environ.get("NEXT_CALENDAR_LOOKAHEAD_DAYS", "3"))
+    events = await fetch_public_calendar_events_for_range(now - timedelta(minutes=30), now + timedelta(days=horizon_days))
+    occurrences = route_occurrences_from_calendar_events(events, now)
+
+    current = occurrences[0] if occurrences else None
+    next_occurrence = None
+    if occurrences:
+        # El siguiente debe ser el siguiente hito temporal real, no una tabla fija.
+        # Si solo hay uno, no inventamos: se usará fallback.
+        next_occurrence = occurrences[1] if len(occurrences) > 1 else None
+
+    return {
+        "now": now.isoformat(timespec="minutes"),
+        "lookahead_days": horizon_days,
+        "events_count": len(events),
+        "occurrences": [
+            {
+                "segment": item["segment"],
+                "at": item["at"].isoformat(timespec="minutes"),
+                "reason": item.get("reason"),
+                "event": item.get("event"),
+            }
+            for item in occurrences[:10]
+        ],
+        "current_segment": current["segment"] if current else None,
+        "next_segment": next_occurrence["segment"] if next_occurrence else None,
+        "current_occurrence": {
+            "segment": current["segment"],
+            "at": current["at"].isoformat(timespec="minutes"),
+            "reason": current.get("reason"),
+            "event": current.get("event"),
+        } if current else None,
+        "next_occurrence": {
+            "segment": next_occurrence["segment"],
+            "at": next_occurrence["at"].isoformat(timespec="minutes"),
+            "reason": next_occurrence.get("reason"),
+            "event": next_occurrence.get("event"),
+        } if next_occurrence else None,
+    }
+
+
+async def next_segment_from_calendar_or_fallback(current_segment: str) -> tuple[str, dict[str, Any]]:
+    plan = await resolve_current_and_next_segments_from_calendar()
+    next_segment = plan.get("next_segment")
+    if isinstance(next_segment, str) and next_segment in ROUTE_ENDPOINTS:
+        plan["decision_source"] = "calendar_future_events"
+        return next_segment, plan
+
+    fallback = next_segment_for(current_segment)
+    plan["decision_source"] = "fallback_no_future_calendar_occurrence"
+    plan["fallback_next_segment"] = fallback
+    return fallback, plan
+
+
+def next_segment_for(current_segment: str) -> str:
+    """Fallback si el calendario no ofrece un siguiente evento real.
+
+    La ruta siguiente normal se calcula con next_segment_from_calendar_or_fallback(),
+    mirando eventos futuros. Esta tabla solo se usa como respaldo.
     """
     default_map = {
         "forus_out": "forus_return",
@@ -830,13 +993,22 @@ def build_google_directions(origin: dict[str, Any], destination: dict[str, Any],
 
 
 def build_apple_directions(origin: dict[str, Any], station: Optional[dict[str, Any]] = None) -> str:
-    # Apple Maps no soporta waypoints de forma fiable en URL; este enlace lleva directo a la gasolinera recomendada.
+    # Apple Maps no soporta waypoints de forma fiable en URL.
+    # Este enlace debe representar siempre el trayecto completo (origen → destino final).
     saddr = endpoint_origin_text(origin)
-    if station:
-        daddr = station_destination_text(station)
-    else:
-        daddr = endpoint_destination_text(origin)
+    daddr = endpoint_destination_text(origin)
     return f"https://maps.apple.com/?saddr={quote_plus(saddr)}&daddr={quote_plus(daddr)}&dirflg=d"
+
+
+def build_apple_station_link(station: Optional[dict[str, Any]]) -> str:
+    if not station:
+        return ""
+    lat, lon = station_lat_lon(station)
+    label = f"{station.get('station_name') or 'Gasolinera'} {station.get('address') or ''} {format_price_label(station.get('price'))}".strip()
+    if lat is not None and lon is not None:
+        return f"https://maps.apple.com/?ll={lat},{lon}&q={quote_plus(label)}"
+    destination = station_destination_text(station)
+    return f"https://maps.apple.com/?q={quote_plus(destination)}"
 
 ROUTE_ROAD_HINTS = {
     "forus_out": [
@@ -1003,7 +1175,8 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
     stations = ([recommended] if recommended else []) + alternatives
     markers = [map_marker_from_station(station, "recommended" if idx == 0 else "alternative") for idx, station in enumerate(stations)]
     valid_stations = [station for station in stations if station_lat_lon(station)[0] is not None]
-    apple_route = build_apple_directions(endpoint, recommended) if recommended else build_apple_directions(endpoint)
+    apple_route = build_apple_directions(endpoint)
+    apple_station = build_apple_station_link(recommended)
     recommended_name = recommended.get("station_name") if recommended else "N/D"
     recommended_price = recommended.get("price") if recommended else None
     return {
@@ -1013,6 +1186,7 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
         "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
         "apple_maps_route": apple_route,
         "apple_maps_recommended_route": apple_route,
+        "apple_maps_recommended_station": apple_station,
         "google_maps_recommended_route": build_google_directions(endpoint, endpoint, valid_stations[:1]),
         "google_maps_all_candidates_route": build_google_directions(endpoint, endpoint, valid_stations),
         "origin": {
@@ -1771,23 +1945,27 @@ async def recommend(
             items = payload.get("items", []) if isinstance(payload, dict) else precioil_station_items(payload)
 
             # Si el usuario pide segment=auto, hacemos una doble evaluación:
-            # 1) trayecto actual, para decidir si repostar ahora;
-            # 2) siguiente trayecto, que es el que se devuelve con mapa/ruta.
+            # 1) trayecto inmediato, que se publica como informe principal;
+            # 2) trayecto posterior, que solo se usa para decidir si merece esperar.
             if requested_segment == "auto" and env_bool("DUAL_ROUTE_EVALUATION_ENABLED", True):
-                next_segment = next_segment_for(segment)
+                next_segment, calendar_route_plan = await next_segment_from_calendar_or_fallback(segment)
                 next_payload, next_rows = await fetch_precioil_relevant_rows(next_segment)
                 save_observations(next_rows)
                 next_result = choose_best(next_rows, next_segment)
                 next_items = next_payload.get("items", []) if isinstance(next_payload, dict) else precioil_station_items(next_payload)
                 comparison = wait_analysis(result, next_result)
+                current_map = build_map_payload(segment, result)
+                next_map = build_map_payload(next_segment, next_result)
                 return {
                     "status": "ok",
                     "source": "precioil",
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
-                    "segment": next_segment,
+                    "segment": segment,
                     "current_segment": segment,
                     "next_segment": next_segment,
-                    "analysis_mode": "dual_current_and_next",
+                    "analysis_mode": "dual_current_and_next_calendar_based",
+                    "published_route": "current_segment",
+                    "calendar_route_plan": calendar_route_plan,
                     "decision": comparison,
                     "current_route": {
                         "segment": segment,
@@ -1796,6 +1974,7 @@ async def recommend(
                         "precioil_raw_items_count": len(items),
                         "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
                         "result": result,
+                        "map": current_map,
                     },
                     "next_route": {
                         "segment": next_segment,
@@ -1804,9 +1983,10 @@ async def recommend(
                         "precioil_raw_items_count": len(next_items),
                         "region_errors": next_payload.get("region_errors", {}) if isinstance(next_payload, dict) else {},
                         "result": next_result,
+                        "map": next_map,
                     },
-                    **next_result,
-                    "map": build_map_payload(next_segment, next_result),
+                    **result,
+                    "map": current_map,
                     **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                 }
 
