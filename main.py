@@ -68,6 +68,16 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://gasolina-api-christ
 # Coordenadas aproximadas para pintar mapa visual orientativo.
 # Las coordenadas exactas de las gasolineras vienen de Precioil.
 ROUTE_ENDPOINTS = {
+    "cabanillas_out": {
+        "origin_name": "Casa · C/ Almendros 6, Anchuelo",
+        "origin_address": "Calle Almendros 6, 28818 Anchuelo, Madrid",
+        "origin_lat": 40.4667,
+        "origin_lon": -3.2687,
+        "destination_name": "DSV / Cabanillas del Campo · Av. de la Veguilla 7",
+        "destination_address": "Avenida de la Veguilla 7, 19171 Cabanillas del Campo, Guadalajara",
+        "destination_lat": 40.6302,
+        "destination_lon": -3.2357,
+    },
     "cabanillas_return": {
         "origin_name": "DSV / Cabanillas del Campo · Av. de la Veguilla 7",
         "origin_address": "Avenida de la Veguilla 7, 19171 Cabanillas del Campo, Guadalajara",
@@ -594,7 +604,7 @@ def precioil_regions_for_segment(segment: str = "all") -> list[str]:
 
     if segment in ("forus_out", "forus_return", "alcala"):
         return forus_corridor
-    if segment == "cabanillas_return":
+    if segment in ("cabanillas_out", "cabanillas_return"):
         return cabanillas_corridor
 
     # Modo diagnóstico o desconocido: cubrir todos los corredores conocidos.
@@ -724,7 +734,7 @@ def route_occurrences_from_calendar_events(events: list[dict[str, Any]], now: da
 
     Ejemplos:
     - Evento Forus futuro: start => forus_out, end => forus_return.
-    - Evento DSV/Cabanillas: end => cabanillas_return.
+    - Evento DSV/Cabanillas futuro: start => cabanillas_out; end => cabanillas_return si hay hora de fin real.
     - Evento Alcalá genérico: start/end => alcala.
     """
     forus_keywords = keyword_list("CAL_FORUS_KEYWORDS", ["forus", "gimnasio", "natacion", "natación", "padel", "pádel", "zumba"])
@@ -763,15 +773,26 @@ def route_occurrences_from_calendar_events(events: list[dict[str, Any]], now: da
             continue
 
         if event_matches(event, cabanillas_keywords):
-            # Para Cabanillas tenemos configurado el retorno desde DSV/oficina.
-            when = end if end >= now else start
-            if when >= now:
+            # Oficina/DSV/Cabanillas:
+            # - antes del inicio, el trayecto real es Casa/Anchuelo → Cabanillas;
+            # - para la vuelta solo se añade si el evento tiene una hora de fin real posterior al inicio.
+            if start >= now:
+                occurrences.append(
+                    {
+                        "segment": "cabanillas_out",
+                        "at": start,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Próximo evento DSV/Cabanillas: ida",
+                    }
+                )
+
+            if end > start and end >= now:
                 occurrences.append(
                     {
                         "segment": "cabanillas_return",
-                        "at": when,
+                        "at": end,
                         "event": serialize_calendar_event(event),
-                        "reason": "Evento DSV/Cabanillas: vuelta",
+                        "reason": "Fin de evento DSV/Cabanillas: vuelta",
                     }
                 )
             continue
@@ -859,6 +880,7 @@ def next_segment_for(current_segment: str) -> str:
     default_map = {
         "forus_out": "forus_return",
         "forus_return": "forus_out",
+        "cabanillas_out": "cabanillas_return",
         "cabanillas_return": "forus_out",
         "alcala": "forus_return",
     }
@@ -1270,6 +1292,8 @@ def segment_weather_title(segment: str) -> str:
         return "☀️ Ida a Forus"
     if segment == "forus_return":
         return "🌙 Regreso Forus → Anchuelo"
+    if segment == "cabanillas_out":
+        return "🏢 Ida Anchuelo → DSV/Cabanillas"
     if segment == "cabanillas_return":
         return "🏢 Vuelta DSV/Cabanillas → Anchuelo"
     if segment == "alcala":
@@ -2167,8 +2191,16 @@ def classify_segment_from_calendar_events(events: list[dict[str, Any]]) -> str |
     if past_or_current_forus:
         return "forus_return"
 
-    # Para Cabanillas solo existe segmento de vuelta configurado.
-    if cabanillas_events:
+    upcoming_cabanillas = [event for event in cabanillas_events if (event.get("start") and event["start"] > now)]
+    if upcoming_cabanillas:
+        upcoming_cabanillas.sort(key=lambda ev: ev["start"])
+        return "cabanillas_out"
+
+    finished_cabanillas = [
+        event for event in cabanillas_events
+        if event.get("end") and event.get("start") and event["end"] > event["start"] and event["end"] <= now
+    ]
+    if finished_cabanillas:
         return "cabanillas_return"
 
     if alcala_events:
@@ -2192,7 +2224,7 @@ async def resolve_auto_segment_info(segment: str) -> tuple[str, dict[str, Any] |
         "events_today_count": 0,
         "calendar_segment": None,
         "fallback_segment": fallback_auto_segment(),
-        "decision_source": "fallback",
+        "decision_source": "no_route",
     }
 
     if env_bool("PUBLIC_CALENDAR_ENABLED", True):
@@ -2205,12 +2237,32 @@ async def resolve_auto_segment_info(segment: str) -> tuple[str, dict[str, Any] |
                 "events_today": [serialize_calendar_event(event) for event in events[:10]],
             }
         )
+
+        # Para el informe automático, priorizamos el próximo trayecto real con fecha/hora
+        # frente a la clasificación genérica del día. Así Cabanillas a las 09:00 se
+        # publica como cabanillas_out antes de ir, no como vuelta ni como Forus posterior.
+        plan = await resolve_current_and_next_segments_from_calendar()
+        debug["calendar_route_plan"] = plan
+        current_segment = plan.get("current_segment")
+        if isinstance(current_segment, str) and current_segment in ROUTE_ENDPOINTS:
+            debug["decision_source"] = "calendar_next_occurrence"
+            return current_segment, debug
+
+        # Si no hay próximos eventos relevantes (oficina/Cabanillas, casa/Anchuelo,
+        # Forus o Alcalá, según keywords), no inventamos ruta por fallback.
+        if env_bool("NO_ROUTE_WHEN_NO_CALENDAR_OCCURRENCE", True):
+            debug["decision_source"] = "no_calendar_occurrence"
+            return "no_route", debug
+
         if calendar_segment:
-            debug["decision_source"] = "calendar"
+            debug["decision_source"] = "calendar_today"
             return calendar_segment, debug
 
-    return fallback_auto_segment(), debug
+    if env_bool("NO_ROUTE_WHEN_NO_CALENDAR_OCCURRENCE", True):
+        return "no_route", debug
 
+    debug["decision_source"] = "fallback"
+    return fallback_auto_segment(), debug
 
 async def resolve_auto_segment(segment: str) -> str:
     resolved_segment, _debug = await resolve_auto_segment_info(segment)
@@ -2320,6 +2372,15 @@ async def recommend(
     # Precioil queda como fuente principal. La oficial solo se usa si se pide explícitamente o como fallback en auto.
     requested_segment = segment
     segment, auto_debug = await resolve_auto_segment_info(segment)
+    if segment == "no_route":
+        return {
+            "status": "no_route",
+            "source": source,
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            "segment": segment,
+            "message": "No hay trayectos próximos relevantes en el calendario.",
+            **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+        }
     precioil_error: Any = None
 
     if source in ("precioil", "auto"):
@@ -2464,6 +2525,8 @@ async def map_image(
 ) -> Response:
     requested_segment = segment
     segment = await resolve_auto_segment(segment)
+    if segment == "no_route":
+        raise HTTPException(status_code=404, detail="No hay trayectos próximos relevantes en el calendario.")
 
     try:
         if source in ("precioil", "auto"):
@@ -2490,6 +2553,11 @@ async def map_view(
 ) -> HTMLResponse:
     requested_segment = segment
     segment = await resolve_auto_segment(segment)
+    if segment == "no_route":
+        return HTMLResponse(
+            "<html><body><h1>Sin trayecto próximo</h1><p>No hay trayectos próximos relevantes en el calendario.</p></body></html>",
+            status_code=404,
+        )
 
     try:
         if source in ("precioil", "auto"):
