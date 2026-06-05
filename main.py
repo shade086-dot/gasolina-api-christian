@@ -1322,34 +1322,149 @@ def _weather_emoji(code: int | None, precip_prob: float | None) -> str:
     return "🌤️"
 
 
-async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[str, Any]:
-    """Resumen meteorológico ligero usando Open-Meteo, sin API key.
+def _weather_error_payload(
+    segment: str,
+    error_type: str,
+    error_message: str,
+    *,
+    provider: str = "open-meteo",
+    at: datetime | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
+    url: str | None = None,
+    status_code: int | None = None,
+) -> dict[str, Any]:
+    """Payload estable para que la meteo falle con diagnóstico y no en silencio."""
+    return {
+        "status": "error",
+        "provider": provider,
+        "segment": segment,
+        "at": at.isoformat(timespec="minutes") if isinstance(at, datetime) else None,
+        "forecast_time": None,
+        "error_type": error_type,
+        "error_message": error_message,
+        "status_code": status_code,
+        "lat": lat,
+        "lon": lon,
+        "url": url,
+        "temperature": None,
+        "precipitation_probability": None,
+        "precipitation": None,
+        "weather_code": None,
+        "weather_label": None,
+        "wind_speed": None,
+        "humidity": None,
+        "emoji": "🌤️",
+    }
 
-    Se consulta el punto medio aproximado del trayecto para representar el corredor Henares/Anchuelo.
+
+async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[str, Any]:
+    """Resumen meteorológico usando Open-Meteo, sin API key.
+
+    Devuelve siempre un dict con status="ok" o status="error". Así el informe de gasolina
+    no se rompe y la respuesta JSON conserva el motivo real del fallo.
     """
-    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_out"])
-    lat = (float(endpoint["origin_lat"]) + float(endpoint["destination_lat"])) / 2
-    lon = (float(endpoint["origin_lon"]) + float(endpoint["destination_lon"])) / 2
+    provider = "open-meteo"
+    url = "https://api.open-meteo.com/v1/forecast"
     tz_name = os.environ.get("LOCAL_TZ", "Europe/Madrid")
     target = at or datetime.now(ZoneInfo(tz_name))
     if target.tzinfo is None:
         target = target.replace(tzinfo=ZoneInfo(tz_name))
+
+    endpoint = ROUTE_ENDPOINTS.get(segment)
+    if not endpoint:
+        return _weather_error_payload(
+            segment,
+            "unknown_segment",
+            f"Segmento no reconocido para meteo: {segment}",
+            provider=provider,
+            at=target,
+            url=url,
+        )
+
+    try:
+        lat = (float(endpoint["origin_lat"]) + float(endpoint["destination_lat"])) / 2
+        lon = (float(endpoint["origin_lon"]) + float(endpoint["destination_lon"])) / 2
+    except Exception as exc:
+        return _weather_error_payload(
+            segment,
+            "missing_coordinates",
+            f"No hay coordenadas válidas para consultar la previsión: {type(exc).__name__}: {exc}",
+            provider=provider,
+            at=target,
+            url=url,
+        )
+
+    # Open-Meteo permite previsión a varios días. Ajustamos el rango al evento del calendario
+    # para no quedarnos sin horas cuando el próximo trayecto cae más allá de 3 días.
+    days_ahead = max(1, (target.date() - datetime.now(ZoneInfo(tz_name)).date()).days + 1)
+    forecast_days = min(16, max(3, days_ahead))
 
     params = {
         "latitude": f"{lat:.5f}",
         "longitude": f"{lon:.5f}",
         "hourly": "temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,relative_humidity_2m",
         "timezone": tz_name,
-        "forecast_days": "3",
+        "forecast_days": str(forecast_days),
     }
-    url = "https://api.open-meteo.com/v1/forecast"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=True) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=True) as client:
+            resp = await client.get(url, params=params)
+            status_code = resp.status_code
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.TimeoutException as exc:
+        return _weather_error_payload(
+            segment,
+            "timeout",
+            f"Timeout consultando {provider}: {exc}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] if exc.response is not None else str(exc)
+        return _weather_error_payload(
+            segment,
+            "http_status",
+            f"{provider} devolvió HTTP {exc.response.status_code if exc.response else 'desconocido'}: {detail}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=exc.response.status_code if exc.response else None,
+        )
+    except Exception as exc:
+        return _weather_error_payload(
+            segment,
+            "provider_error",
+            f"Error consultando {provider}: {type(exc).__name__}: {exc}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+        )
 
     hourly = data.get("hourly", {}) if isinstance(data, dict) else {}
     times = hourly.get("time") or []
+    if not isinstance(times, list) or not times:
+        return _weather_error_payload(
+            segment,
+            "empty_response",
+            "Open-Meteo no devolvió horas de previsión en hourly.time.",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=status_code,
+        )
+
     temps = hourly.get("temperature_2m") or []
     pops = hourly.get("precipitation_probability") or []
     precs = hourly.get("precipitation") or []
@@ -1370,6 +1485,19 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
             best_delta = delta
             best_idx = idx
 
+    if best_delta is None:
+        return _weather_error_payload(
+            segment,
+            "invalid_times",
+            "Open-Meteo devolvió horas, pero ninguna se pudo interpretar.",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=status_code,
+        )
+
     def _get(seq: list[Any], idx: int) -> Any:
         return seq[idx] if isinstance(seq, list) and 0 <= idx < len(seq) else None
 
@@ -1382,6 +1510,8 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
     forecast_time = _parse_iso_datetime(_get(times, best_idx))
 
     return {
+        "status": "ok",
+        "provider": provider,
         "segment": segment,
         "at": target.isoformat(timespec="minutes"),
         "forecast_time": forecast_time.isoformat(timespec="minutes") if forecast_time else None,
@@ -1393,6 +1523,8 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
         "wind_speed": wind,
         "humidity": humidity,
         "emoji": _weather_emoji(int(code) if code is not None else None, float(pop) if pop is not None else None),
+        "lat": lat,
+        "lon": lon,
     }
 
 
@@ -1535,25 +1667,52 @@ def weather_text_block(segment: str, weather: dict[str, Any] | None) -> dict[str
     title = segment_weather_title(segment)
     if not weather:
         return {
+            "status": "error",
             "segment": segment,
             "title": title,
             "at": None,
             "bullets": ["Previsión no disponible ahora mismo."],
             "result": "Previsión no disponible ahora mismo.",
+            "error_type": "not_requested_or_empty",
+            "error_message": "No se recibió payload de previsión.",
         }
+
+    if weather.get("status") == "error":
+        return {
+            "status": "error",
+            "provider": weather.get("provider"),
+            "segment": segment,
+            "title": title,
+            "at": weather.get("at"),
+            "forecast_time": weather.get("forecast_time"),
+            "bullets": ["Previsión no disponible ahora mismo."],
+            "result": "Previsión no disponible ahora mismo.",
+            "error_type": weather.get("error_type"),
+            "error_message": weather.get("error_message"),
+            "status_code": weather.get("status_code"),
+            "lat": weather.get("lat"),
+            "lon": weather.get("lon"),
+        }
+
     return {
+        "status": "ok",
+        "provider": weather.get("provider"),
         "segment": segment,
         "title": title,
         "at": weather.get("at"),
         "forecast_time": weather.get("forecast_time"),
         "temperature": weather.get("temperature"),
         "precipitation_probability": weather.get("precipitation_probability"),
+        "precipitation": weather.get("precipitation"),
         "wind_speed": weather.get("wind_speed"),
         "humidity": weather.get("humidity"),
         "weather_label": weather.get("weather_label"),
+        "lat": weather.get("lat"),
+        "lon": weather.get("lon"),
         "bullets": _weather_bullets(weather),
         "result": _weather_practical_result(weather),
     }
+
 
 
 async def build_weather_summary_payload(
@@ -1608,10 +1767,29 @@ async def build_weather_summary_payload(
         lines.append("Gasolina")
         lines.append(str(decision.get("reason")))
 
+    weather_debug = {
+        "enabled": True,
+        "current": {
+            "status": current_block.get("status") if isinstance(current_block, dict) else None,
+            "provider": current_block.get("provider") if isinstance(current_block, dict) else None,
+            "error_type": current_block.get("error_type") if isinstance(current_block, dict) else None,
+            "error_message": current_block.get("error_message") if isinstance(current_block, dict) else None,
+            "status_code": current_block.get("status_code") if isinstance(current_block, dict) else None,
+        },
+        "next": {
+            "status": next_block.get("status") if isinstance(next_block, dict) else None,
+            "provider": next_block.get("provider") if isinstance(next_block, dict) else None,
+            "error_type": next_block.get("error_type") if isinstance(next_block, dict) else None,
+            "error_message": next_block.get("error_message") if isinstance(next_block, dict) else None,
+            "status_code": next_block.get("status_code") if isinstance(next_block, dict) else None,
+        } if isinstance(next_block, dict) else None,
+    }
+
     return {
         "current": current_block,
         "next": next_block,
         "summary_text": "\n".join(lines),
+        "weather_debug": weather_debug,
     }
 
 def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: dict[str, Any], weather_panel_html: str | None = None) -> str:
