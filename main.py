@@ -1358,7 +1358,327 @@ def _weather_error_payload(
     }
 
 
+WEATHER_CACHE: dict[str, tuple[datetime, dict[str, Any]]] = {}
+WEATHER_CACHE_TTL_SECONDS = int(os.environ.get("WEATHER_CACHE_TTL_SECONDS", "3600"))
+MET_NO_USER_AGENT = os.environ.get(
+    "MET_NO_USER_AGENT",
+    "gasolina-api/1.0 https://gasolina-api-christian.onrender.com"
+)
+
+
+def _route_weather_target(segment: str, at: datetime | None = None) -> tuple[dict[str, Any] | None, datetime, float | None, float | None, str | None]:
+    tz_name = os.environ.get("LOCAL_TZ", "Europe/Madrid")
+    target = at or datetime.now(ZoneInfo(tz_name))
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=ZoneInfo(tz_name))
+
+    endpoint = ROUTE_ENDPOINTS.get(segment)
+    if not endpoint:
+        return None, target, None, None, tz_name
+
+    try:
+        lat = (float(endpoint["origin_lat"]) + float(endpoint["destination_lat"])) / 2
+        lon = (float(endpoint["origin_lon"]) + float(endpoint["destination_lon"])) / 2
+    except Exception:
+        return endpoint, target, None, None, tz_name
+
+    return endpoint, target, lat, lon, tz_name
+
+
+def _weather_cache_key(segment: str, target: datetime, provider: str) -> str:
+    # Redondea a hora para reutilizar previsiones de una misma franja y no gastar cuota.
+    rounded = target.replace(minute=0, second=0, microsecond=0)
+    return f"{provider}:{segment}:{rounded.isoformat()}"
+
+
+def _weather_cache_get(segment: str, target: datetime, provider: str) -> dict[str, Any] | None:
+    if WEATHER_CACHE_TTL_SECONDS <= 0:
+        return None
+    key = _weather_cache_key(segment, target, provider)
+    cached = WEATHER_CACHE.get(key)
+    if not cached:
+        return None
+    stored_at, payload = cached
+    age = (datetime.now(ZoneInfo(os.environ.get("LOCAL_TZ", "Europe/Madrid"))) - stored_at).total_seconds()
+    if age > WEATHER_CACHE_TTL_SECONDS:
+        WEATHER_CACHE.pop(key, None)
+        return None
+    cloned = dict(payload)
+    cloned["cache"] = {"hit": True, "provider": provider, "age_seconds": int(age)}
+    return cloned
+
+
+def _weather_cache_set(segment: str, target: datetime, provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if WEATHER_CACHE_TTL_SECONDS <= 0 or not isinstance(payload, dict) or payload.get("status") != "ok":
+        return payload
+    key = _weather_cache_key(segment, target, provider)
+    WEATHER_CACHE[key] = (
+        datetime.now(ZoneInfo(os.environ.get("LOCAL_TZ", "Europe/Madrid"))),
+        dict(payload),
+    )
+    return payload
+
+
+def _met_symbol_to_weather(symbol: Any, precipitation: Any = None) -> tuple[int | None, str]:
+    raw = str(symbol or "").lower()
+    try:
+        precip_value = float(precipitation)
+    except Exception:
+        precip_value = 0.0
+
+    if "thunder" in raw:
+        return 95, "tormenta"
+    if "sleet" in raw:
+        return 69, "aguanieve"
+    if "snow" in raw:
+        return 71, "nieve débil" if "light" in raw else "nieve"
+    if "rain" in raw:
+        if "light" in raw:
+            return 61, "lluvia débil"
+        if "heavy" in raw:
+            return 65, "lluvia fuerte"
+        return 63, "lluvia"
+    if "fog" in raw:
+        return 45, "niebla"
+    if "cloudy" in raw:
+        return 3, "cubierto"
+    if "partlycloudy" in raw or "fair" in raw:
+        return 2, "nuboso parcial"
+    if "clearsky" in raw:
+        return 0, "cielo despejado"
+    if precip_value > 0:
+        return 61, "lluvia débil"
+    return None, "tiempo variable"
+
+
+async def fetch_route_weather_met_no(segment: str, at: datetime | None = None) -> dict[str, Any]:
+    """Fallback meteorológico con MET Norway Locationforecast.
+
+    MET Norway exige un User-Agent identificable. Configúralo en Render con
+    MET_NO_USER_AGENT="gasolina-api/1.0 tu_email_o_url".
+    """
+    provider = "met.no"
+    url = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+    endpoint, target, lat, lon, tz_name = _route_weather_target(segment, at)
+
+    if not endpoint:
+        return _weather_error_payload(
+            segment,
+            "unknown_segment",
+            f"Segmento no reconocido para meteo: {segment}",
+            provider=provider,
+            at=target,
+            url=url,
+        )
+
+    if lat is None or lon is None:
+        return _weather_error_payload(
+            segment,
+            "missing_coordinates",
+            "No hay coordenadas válidas para consultar MET Norway.",
+            provider=provider,
+            at=target,
+            url=url,
+        )
+
+    cached = _weather_cache_get(segment, target, provider)
+    if cached:
+        return cached
+
+    # MET recomienda no usar más de 4 decimales para mejorar caché y evitar bloqueos.
+    params = {"lat": f"{lat:.4f}", "lon": f"{lon:.4f}"}
+    headers = {
+        "User-Agent": MET_NO_USER_AGENT,
+        "Accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=True) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            status_code = resp.status_code
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.TimeoutException as exc:
+        return _weather_error_payload(
+            segment,
+            "timeout",
+            f"Timeout consultando {provider}: {exc}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] if exc.response is not None else str(exc)
+        return _weather_error_payload(
+            segment,
+            "http_status",
+            f"{provider} devolvió HTTP {exc.response.status_code if exc.response else 'desconocido'}: {detail}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=exc.response.status_code if exc.response else None,
+        )
+    except Exception as exc:
+        return _weather_error_payload(
+            segment,
+            "provider_error",
+            f"Error consultando {provider}: {type(exc).__name__}: {exc}",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+        )
+
+    timeseries = (((data or {}).get("properties") or {}).get("timeseries") or [])
+    if not isinstance(timeseries, list) or not timeseries:
+        return _weather_error_payload(
+            segment,
+            "empty_response",
+            "MET Norway no devolvió timeseries en properties.timeseries.",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=status_code,
+        )
+
+    best_item = None
+    best_delta = None
+    best_time = None
+    for item in timeseries:
+        raw_time = item.get("time") if isinstance(item, dict) else None
+        dt = _parse_iso_datetime(raw_time)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt_local = dt.astimezone(ZoneInfo(tz_name))
+        delta = abs((dt_local - target).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_item = item
+            best_time = dt_local
+
+    if not isinstance(best_item, dict):
+        return _weather_error_payload(
+            segment,
+            "invalid_times",
+            "MET Norway devolvió horas, pero ninguna se pudo interpretar.",
+            provider=provider,
+            at=target,
+            lat=lat,
+            lon=lon,
+            url=url,
+            status_code=status_code,
+        )
+
+    data_block = best_item.get("data") or {}
+    instant_details = ((data_block.get("instant") or {}).get("details") or {})
+    next_1h = data_block.get("next_1_hours") or data_block.get("next_6_hours") or data_block.get("next_12_hours") or {}
+    next_details = next_1h.get("details") or {}
+    summary = next_1h.get("summary") or {}
+
+    temp = instant_details.get("air_temperature")
+    humidity = instant_details.get("relative_humidity")
+    wind_ms = instant_details.get("wind_speed")
+    wind_kmh = round(float(wind_ms) * 3.6, 1) if isinstance(wind_ms, (int, float)) else None
+    precipitation = next_details.get("precipitation_amount")
+    symbol = summary.get("symbol_code")
+
+    code, label = _met_symbol_to_weather(symbol, precipitation)
+    try:
+        precip_value = float(precipitation or 0)
+    except Exception:
+        precip_value = 0.0
+    pop = 60 if precip_value > 0 else (30 if code in (61, 63, 65, 80, 81, 82, 95, 96, 99) else 0)
+
+    payload = {
+        "status": "ok",
+        "provider": provider,
+        "segment": segment,
+        "at": target.isoformat(timespec="minutes"),
+        "forecast_time": best_time.isoformat(timespec="minutes") if isinstance(best_time, datetime) else None,
+        "temperature": temp,
+        "precipitation_probability": pop,
+        "precipitation": precipitation,
+        "weather_code": code,
+        "weather_label": label,
+        "wind_speed": wind_kmh,
+        "humidity": humidity,
+        "emoji": _weather_emoji(code, float(pop) if pop is not None else None),
+        "lat": lat,
+        "lon": lon,
+    }
+    return _weather_cache_set(segment, target, provider, payload)
+
+
 async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[str, Any]:
+    """Meteo con caché, Open-Meteo como principal y MET Norway como fallback."""
+    endpoint, target, lat, lon, tz_name = _route_weather_target(segment, at)
+    providers_tried: list[dict[str, Any]] = []
+
+    if not endpoint:
+        return _weather_error_payload(
+            segment,
+            "unknown_segment",
+            f"Segmento no reconocido para meteo: {segment}",
+            provider="weather",
+            at=target,
+        )
+
+    if lat is None or lon is None:
+        return _weather_error_payload(
+            segment,
+            "missing_coordinates",
+            "No hay coordenadas válidas para consultar la previsión.",
+            provider="weather",
+            at=target,
+        )
+
+    cached = _weather_cache_get(segment, target, "open-meteo")
+    if cached:
+        cached["providers_tried"] = [{"provider": "open-meteo", "status": "ok", "cache_hit": True}]
+        return cached
+
+    open_meteo = await fetch_route_weather_open_meteo(segment, at)
+    providers_tried.append({
+        "provider": "open-meteo",
+        "status": open_meteo.get("status"),
+        "error_type": open_meteo.get("error_type"),
+        "error_message": open_meteo.get("error_message"),
+        "status_code": open_meteo.get("status_code"),
+        "cache_hit": bool((open_meteo.get("cache") or {}).get("hit")),
+    })
+    if open_meteo.get("status") == "ok":
+        open_meteo["providers_tried"] = providers_tried
+        return _weather_cache_set(segment, target, "open-meteo", open_meteo)
+
+    met_no = await fetch_route_weather_met_no(segment, at)
+    providers_tried.append({
+        "provider": "met.no",
+        "status": met_no.get("status"),
+        "error_type": met_no.get("error_type"),
+        "error_message": met_no.get("error_message"),
+        "status_code": met_no.get("status_code"),
+        "cache_hit": bool((met_no.get("cache") or {}).get("hit")),
+    })
+    met_no["providers_tried"] = providers_tried
+    if met_no.get("status") == "ok":
+        return met_no
+
+    # Devuelve el último error, pero conserva toda la cadena de proveedores intentados.
+    met_no["provider"] = "weather-fallback"
+    met_no["providers_tried"] = providers_tried
+    return met_no
+
+
+async def fetch_route_weather_open_meteo(segment: str, at: datetime | None = None) -> dict[str, Any]:
     """Resumen meteorológico usando Open-Meteo, sin API key.
 
     Devuelve siempre un dict con status="ok" o status="error". Así el informe de gasolina
@@ -1394,6 +1714,10 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
             at=target,
             url=url,
         )
+
+    cached = _weather_cache_get(segment, target, provider)
+    if cached:
+        return cached
 
     # Open-Meteo permite previsión a varios días. Ajustamos el rango al evento del calendario
     # para no quedarnos sin horas cuando el próximo trayecto cae más allá de 3 días.
@@ -1509,7 +1833,7 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
     humidity = _get(hums, best_idx)
     forecast_time = _parse_iso_datetime(_get(times, best_idx))
 
-    return {
+    payload = {
         "status": "ok",
         "provider": provider,
         "segment": segment,
@@ -1526,6 +1850,7 @@ async def fetch_route_weather(segment: str, at: datetime | None = None) -> dict[
         "lat": lat,
         "lon": lon,
     }
+    return _weather_cache_set(segment, target, provider, payload)
 
 
 def _weather_bullets(weather: dict[str, Any]) -> list[str]:
@@ -1692,6 +2017,8 @@ def weather_text_block(segment: str, weather: dict[str, Any] | None) -> dict[str
             "status_code": weather.get("status_code"),
             "lat": weather.get("lat"),
             "lon": weather.get("lon"),
+            "providers_tried": weather.get("providers_tried"),
+            "cache": weather.get("cache"),
         }
 
     return {
@@ -1709,6 +2036,8 @@ def weather_text_block(segment: str, weather: dict[str, Any] | None) -> dict[str
         "weather_label": weather.get("weather_label"),
         "lat": weather.get("lat"),
         "lon": weather.get("lon"),
+        "providers_tried": weather.get("providers_tried"),
+        "cache": weather.get("cache"),
         "bullets": _weather_bullets(weather),
         "result": _weather_practical_result(weather),
     }
@@ -1775,6 +2104,8 @@ async def build_weather_summary_payload(
             "error_type": current_block.get("error_type") if isinstance(current_block, dict) else None,
             "error_message": current_block.get("error_message") if isinstance(current_block, dict) else None,
             "status_code": current_block.get("status_code") if isinstance(current_block, dict) else None,
+            "providers_tried": current_block.get("providers_tried") if isinstance(current_block, dict) else None,
+            "cache": current_block.get("cache") if isinstance(current_block, dict) else None,
         },
         "next": {
             "status": next_block.get("status") if isinstance(next_block, dict) else None,
@@ -1782,6 +2113,8 @@ async def build_weather_summary_payload(
             "error_type": next_block.get("error_type") if isinstance(next_block, dict) else None,
             "error_message": next_block.get("error_message") if isinstance(next_block, dict) else None,
             "status_code": next_block.get("status_code") if isinstance(next_block, dict) else None,
+            "providers_tried": next_block.get("providers_tried") if isinstance(next_block, dict) else None,
+            "cache": next_block.get("cache") if isinstance(next_block, dict) else None,
         } if isinstance(next_block, dict) else None,
     }
 
