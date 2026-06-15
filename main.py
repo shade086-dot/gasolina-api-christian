@@ -775,8 +775,19 @@ def route_occurrences_from_calendar_events(events: list[dict[str, Any]], now: da
         if event_matches(event, cabanillas_keywords):
             # Oficina/DSV/Cabanillas:
             # - antes del inicio, el trayecto real es Casa/Anchuelo → Cabanillas;
-            # - para la vuelta solo se añade si el evento tiene una hora de fin real posterior al inicio.
-            if start >= now:
+            # - si ya empezó y sigue activo, o es un evento puntual de oficina dentro
+            #   de la ventana de mañana, consideramos que estamos allí y toca vuelta;
+            # - para la vuelta con hora de fin real, se mantiene la regla anterior.
+            if cabanillas_event_holds_current_location(event, now):
+                occurrences.append(
+                    {
+                        "segment": "cabanillas_return",
+                        "at": now,
+                        "event": serialize_calendar_event(event),
+                        "reason": "Evento Oficina/DSV/Cabanillas ya iniciado: considerar ubicación actual hasta mediodía",
+                    }
+                )
+            elif start >= now:
                 occurrences.append(
                     {
                         "segment": "cabanillas_out",
@@ -818,7 +829,10 @@ async def resolve_current_and_next_segments_from_calendar() -> dict[str, Any]:
     tz = local_tz()
     now = datetime.now(tz)
     horizon_days = int(os.environ.get("NEXT_CALENDAR_LOOKAHEAD_DAYS", "3"))
-    events = await fetch_public_calendar_events_for_range(now - timedelta(minutes=30), now + timedelta(days=horizon_days))
+    # Miramos desde el inicio del día para no perder eventos de Oficina/DSV de duración cero
+    # que empezaron por la mañana y deben contar como ubicación actual hasta mediodía.
+    start_day = datetime.combine(now.date(), datetime.min.time(), tzinfo=tz)
+    events = await fetch_public_calendar_events_for_range(start_day, now + timedelta(days=horizon_days))
     occurrences = route_occurrences_from_calendar_events(events, now)
 
     current = occurrences[0] if occurrences else None
@@ -2674,6 +2688,42 @@ def event_matches(event: dict[str, Any], keywords: list[str]) -> bool:
     return any(keyword and keyword in text for keyword in keywords)
 
 
+def office_hold_until_for_day(day: date, tz: ZoneInfo) -> datetime:
+    """Hora límite para considerar que seguimos en Oficina/DSV aunque el evento sea puntual.
+
+    Configurable con OFFICE_CABANILLAS_HOLD_UNTIL en formato HH:MM.
+    Por defecto mantiene la ubicación de oficina hasta las 14:00.
+    """
+    raw = os.environ.get("OFFICE_CABANILLAS_HOLD_UNTIL", "14:00").strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = max(0, min(23, int(hour_text)))
+        minute = max(0, min(59, int(minute_text)))
+    except Exception:
+        hour, minute = 14, 0
+    return datetime.combine(day, datetime.min.time(), tzinfo=tz).replace(hour=hour, minute=minute)
+
+
+def cabanillas_event_holds_current_location(event: dict[str, Any], now: datetime) -> bool:
+    """Detecta eventos Oficina/DSV/Cabanillas ya iniciados que deben contar como ubicación actual.
+
+    Esto cubre eventos de duración cero como "Oficina 09:00-09:00": hasta mediodía
+    aproximadamente se interpreta que estás en oficina, por tanto el trayecto útil es
+    cabanillas_return y no el siguiente evento futuro de Forus.
+    """
+    start = event.get("start")
+    if not isinstance(start, datetime):
+        return False
+    if start.date() != now.date() or start > now:
+        return False
+
+    end = event.get("end")
+    if isinstance(end, datetime) and end > start:
+        return start <= now <= end
+
+    return now <= office_hold_until_for_day(start.date(), now.tzinfo or local_tz())
+
+
 def classify_segment_from_calendar_events(events: list[dict[str, Any]]) -> str | None:
     if not events:
         return None
@@ -2682,12 +2732,19 @@ def classify_segment_from_calendar_events(events: list[dict[str, Any]]) -> str |
     now = datetime.now(tz)
 
     forus_keywords = keyword_list("CAL_FORUS_KEYWORDS", ["forus", "gimnasio", "natacion", "natación", "padel", "pádel"])
-    cabanillas_keywords = keyword_list("CAL_CABANILLAS_KEYWORDS", ["cabanillas", "dsv", "guadalajara", "azuqueca"])
+    cabanillas_keywords = keyword_list("CAL_CABANILLAS_KEYWORDS", ["cabanillas", "dsv", "guadalajara", "azuqueca", "oficina"])
     alcala_keywords = keyword_list("CAL_ALCALA_KEYWORDS", ["alcala", "alcalá", "alcala de henares", "alcalá de henares"])
 
     forus_events = [event for event in events if event_matches(event, forus_keywords)]
     cabanillas_events = [event for event in events if event_matches(event, cabanillas_keywords)]
     alcala_events = [event for event in events if event_matches(event, alcala_keywords)]
+
+    current_cabanillas = [
+        event for event in cabanillas_events
+        if cabanillas_event_holds_current_location(event, now)
+    ]
+    if current_cabanillas:
+        return "cabanillas_return"
 
     # Si hay Forus pendiente hoy, lo normal es ir hacia Forus. Si ya empezó/terminó, toca vuelta.
     upcoming_forus = [event for event in forus_events if (event.get("start") and event["start"] > now)]
