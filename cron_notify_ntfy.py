@@ -56,6 +56,56 @@ def build_ntfy_actions(map_url: str | None, apple_url: str | None, google_url: s
     return full
 
 
+def compact_route_title(data: dict) -> str:
+    """Devuelve un título corto del trayecto/ciudad para la cabecera de ntfy."""
+    # 1) Para modo viaje, el mapa suele traer origen/destino claros.
+    map_data = data.get("map") or {}
+    origin = (map_data.get("origin") or {}).get("name") or ""
+    destination = (map_data.get("destination") or {}).get("name") or ""
+    segment = str(data.get("segment") or "")
+
+    if origin and destination:
+        # En búsquedas por ciudad suele ser "Centro de X" -> "Zona X"; mejor simplificar.
+        if segment.startswith("travel_city_"):
+            city = destination.replace("Zona ", "").strip() or origin.replace("Centro de ", "").strip()
+            if city:
+                return f"Gasolina en {city}"
+        if origin != destination:
+            return f"{origin} → {destination}"
+
+    # 2) El resumen del mapa suele tener "Origen → Destino · Recomendada: ..."
+    summary = str(map_data.get("summary") or "")
+    if "· Recomendada:" in summary:
+        summary = summary.split("· Recomendada:", 1)[0].strip()
+    if summary:
+        # Acorta nombres muy largos para que el título no se corte demasiado.
+        return summary
+
+    # 3) Meteo suele traer títulos humanos: "Vuelta DSV/Cabanillas → Anchuelo", "Gasolina en Bilbao"...
+    weather = data.get("weather_summary") or {}
+    current = weather.get("current") or {}
+    wt = str(current.get("title") or "").strip()
+    if wt:
+        return wt
+
+    # 4) Fallback por segmento.
+    names = {
+        "cabanillas_out": "Ida Anchuelo → DSV/Cabanillas",
+        "cabanillas_return": "Vuelta DSV/Cabanillas → Anchuelo",
+        "forus_out": "Ida a Forus",
+        "forus_return": "Vuelta Forus → Anchuelo",
+        "alcala": "Trayecto Alcalá",
+        "auto": "Ruta automática",
+    }
+    return names.get(segment, segment or "Informe gasolina")
+
+
+def shorten_title(value: str, max_len: int = 80) -> str:
+    value = " ".join(str(value or "").split())
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1].rstrip() + "…"
+
 def post_ntfy(
     title: str,
     message: str,
@@ -133,7 +183,8 @@ def build_message(data: dict) -> tuple[str, str, str | None, str | None, str | N
     trust = rec.get("trust_note", "")
     reason = decision.get("reason", "")
 
-    title = f"Gasolina {price} eur/l"
+    route_title = compact_route_title(data)
+    title = shorten_title(f"{route_title} · SP95 {price} €/l", 80)
 
     weather_result = current_weather.get("result", "")
     weather_bullets = current_weather.get("bullets", []) or []
