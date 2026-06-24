@@ -11,6 +11,7 @@ from typing import Any, Optional
 from urllib.parse import quote_plus, urlencode, urlparse, parse_qs, unquote
 import html
 import math
+import hashlib
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
@@ -119,6 +120,16 @@ ROUTE_ENDPOINTS = {
         "destination_lon": -3.2687,
     },
 }
+
+# Rutas dinámicas de viaje creadas por /recommend?mode=city|route.
+# Se guardan en memoria para que /map?segment=... pueda reutilizarlas si el proceso sigue vivo.
+# Aun así, las URLs de mapa incluyen city/origin/destination para poder reconstruirlas tras reinicios.
+DYNAMIC_ROUTE_ENDPOINTS: dict[str, dict[str, Any]] = {}
+DYNAMIC_ROUTE_POINTS: dict[str, list[dict[str, float]]] = {}
+DYNAMIC_SEARCH_REGIONS: dict[str, list[dict[str, Any]]] = {}
+DYNAMIC_ROUTE_QUERY: dict[str, dict[str, str]] = {}
+GEOCODE_CACHE: dict[str, dict[str, Any]] = {}
+
 
 PRECIOIL_REGIONS = {
     "alcala_daganzo": {
@@ -313,6 +324,244 @@ async def fetch_precioil_json(path: str, params: dict[str, Any] | None = None) -
         )
 
 
+def slugify(value: Any, max_len: int = 50) -> str:
+    raw = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw)
+    slug = "_".join(part for part in slug.split("_") if part)
+    return (slug or "viaje")[:max_len]
+
+
+def get_route_endpoint(segment: str) -> dict[str, Any] | None:
+    return DYNAMIC_ROUTE_ENDPOINTS.get(segment) or ROUTE_ENDPOINTS.get(segment)
+
+
+def route_known(segment: str | None) -> bool:
+    return bool(isinstance(segment, str) and get_route_endpoint(segment) is not None)
+
+
+def dynamic_map_query(segment: str) -> str:
+    params = DYNAMIC_ROUTE_QUERY.get(segment)
+    if not params:
+        return f"segment={quote_plus(segment)}"
+    merged = {"segment": segment, **params}
+    return urlencode(merged)
+
+
+async def geocode_location(query: str) -> dict[str, Any]:
+    """Geocodifica una ciudad/dirección con Nominatim. Falla explícitamente si no hay resultado."""
+    q = (query or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Falta ciudad, origen o destino para geocodificar.")
+
+    cache_key = norm(q)
+    if cache_key in GEOCODE_CACHE:
+        return GEOCODE_CACHE[cache_key]
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": q,
+        "format": "jsonv2",
+        "limit": "1",
+        "addressdetails": "1",
+        "countrycodes": os.environ.get("GEOCODE_COUNTRYCODES", "es"),
+    }
+    headers = {
+        "User-Agent": os.environ.get(
+            "GEOCODE_USER_AGENT",
+            "gasolina-api-christian/1.0 contacto: configurar_GEOCODE_USER_AGENT",
+        ),
+        "Accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=6.0), follow_redirects=True) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Geocodificación devolvió HTTP {exc.response.status_code}: {exc.response.text[:300]}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudo geocodificar '{q}': {type(exc).__name__}: {exc}")
+
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=404, detail=f"No encontré coordenadas para '{q}'.")
+
+    item = data[0]
+    try:
+        lat = float(item["lat"])
+        lon = float(item["lon"])
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Resultado de geocodificación inválido para '{q}'.")
+
+    result = {
+        "query": q,
+        "name": item.get("display_name") or q,
+        "lat": lat,
+        "lon": lon,
+        "raw": item,
+    }
+    GEOCODE_CACHE[cache_key] = result
+    return result
+
+
+def interpolate_route_points(origin: dict[str, Any], destination: dict[str, Any], steps: int = 6) -> list[dict[str, float]]:
+    steps = max(2, steps)
+    points: list[dict[str, float]] = []
+    for idx in range(steps):
+        t = idx / (steps - 1)
+        points.append({
+            "lat": float(origin["lat"]) + (float(destination["lat"]) - float(origin["lat"])) * t,
+            "lon": float(origin["lon"]) + (float(destination["lon"]) - float(origin["lon"])) * t,
+        })
+    return points
+
+
+async def fetch_osrm_route_points(origin: dict[str, Any], destination: dict[str, Any]) -> list[dict[str, float]]:
+    """Obtiene geometría aproximada de carretera con OSRM público. Si falla, se usa línea interpolada."""
+    if not env_bool("TRAVEL_OSRM_ENABLED", True):
+        return interpolate_route_points(origin, destination)
+
+    base = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org").rstrip("/")
+    coords = f"{float(origin['lon'])},{float(origin['lat'])};{float(destination['lon'])},{float(destination['lat'])}"
+    url = f"{base}/route/v1/driving/{coords}"
+    params = {"overview": "full", "geometries": "geojson", "alternatives": "false", "steps": "false"}
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0), follow_redirects=True) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        routes = data.get("routes") if isinstance(data, dict) else None
+        coordinates = (((routes or [{}])[0].get("geometry") or {}).get("coordinates") or [])
+        raw_points = [{"lat": float(lat), "lon": float(lon)} for lon, lat in coordinates if lon is not None and lat is not None]
+        if len(raw_points) >= 2:
+            return sample_route_points(raw_points, int(os.environ.get("TRAVEL_ROUTE_VISUAL_POINTS", "14")))
+    except Exception as exc:
+        print(f"[travel] OSRM no disponible, uso ruta interpolada: {type(exc).__name__}: {exc}")
+
+    return interpolate_route_points(origin, destination)
+
+
+def sample_route_points(points: list[dict[str, float]], max_points: int) -> list[dict[str, float]]:
+    if len(points) <= max_points:
+        return points
+    max_points = max(2, max_points)
+    idxs = [round(i * (len(points) - 1) / (max_points - 1)) for i in range(max_points)]
+    sampled: list[dict[str, float]] = []
+    seen: set[int] = set()
+    for idx in idxs:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        sampled.append(points[idx])
+    return sampled
+
+
+def register_dynamic_route(
+    segment: str,
+    endpoint: dict[str, Any],
+    route_points: list[dict[str, float]],
+    search_regions: list[dict[str, Any]],
+    query: dict[str, str],
+) -> str:
+    DYNAMIC_ROUTE_ENDPOINTS[segment] = endpoint
+    DYNAMIC_ROUTE_POINTS[segment] = route_points
+    DYNAMIC_SEARCH_REGIONS[segment] = search_regions
+    DYNAMIC_ROUTE_QUERY[segment] = query
+    return segment
+
+
+def build_search_regions_from_points(points: list[dict[str, float]], radius_km: int, max_regions: int = 7) -> list[dict[str, Any]]:
+    sampled = sample_route_points(points, max_regions)
+    regions: list[dict[str, Any]] = []
+    for idx, p in enumerate(sampled, start=1):
+        regions.append({
+            "name": f"travel_{idx}",
+            "latitud": float(p["lat"]),
+            "longitud": float(p["lon"]),
+            "radio": radius_km,
+        })
+    return regions
+
+
+async def resolve_travel_segment(
+    *,
+    mode: str | None = None,
+    city: str | None = None,
+    origin: str | None = None,
+    destination: str | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Crea un segmento dinámico para ciudad o ruta.
+
+    mode=city&city=Bilbao
+    mode=route&origin=Anchuelo&destination=Bilbao
+    También acepta inferencia: si hay city => city; si hay origin+destination => route.
+    """
+    selected_mode = (mode or "").strip().lower()
+    if not selected_mode:
+        selected_mode = "city" if city else ("route" if origin and destination else "")
+
+    if selected_mode not in {"city", "route", "travel"}:
+        return None, {}
+
+    if selected_mode in {"city", "travel"} and city:
+        geo = await geocode_location(city)
+        slug = slugify(city)
+        segment = f"travel_city_{slug}"
+        endpoint = {
+            "origin_name": f"Centro de {city}",
+            "origin_address": geo["name"],
+            "origin_lat": geo["lat"],
+            "origin_lon": geo["lon"],
+            "destination_name": f"Zona {city}",
+            "destination_address": geo["name"],
+            "destination_lat": geo["lat"],
+            "destination_lon": geo["lon"],
+            "travel_mode": "city",
+            "travel_label": city,
+        }
+        radius = int(os.environ.get("TRAVEL_CITY_SEARCH_RADIUS_KM", "15"))
+        regions = build_search_regions_from_points([{"lat": geo["lat"], "lon": geo["lon"]}], radius, 1)
+        register_dynamic_route(segment, endpoint, [{"lat": geo["lat"], "lon": geo["lon"]}], regions, {"mode": "city", "city": city})
+        return segment, {"mode": "city", "city": city, "geocode": geo, "search_radius_km": radius}
+
+    if selected_mode in {"route", "travel"} and origin and destination:
+        o = await geocode_location(origin)
+        d = await geocode_location(destination)
+        digest = hashlib.sha1(f"{o['lat']},{o['lon']}->{d['lat']},{d['lon']}".encode("utf-8")).hexdigest()[:10]
+        segment = f"travel_route_{digest}"
+        route_points = await fetch_osrm_route_points(o, d)
+        endpoint = {
+            "origin_name": origin,
+            "origin_address": o["name"],
+            "origin_lat": o["lat"],
+            "origin_lon": o["lon"],
+            "destination_name": destination,
+            "destination_address": d["name"],
+            "destination_lat": d["lat"],
+            "destination_lon": d["lon"],
+            "travel_mode": "route",
+            "travel_label": f"{origin} → {destination}",
+        }
+        radius = int(os.environ.get("TRAVEL_ROUTE_SEARCH_RADIUS_KM", "25"))
+        regions = build_search_regions_from_points(route_points, radius, int(os.environ.get("TRAVEL_ROUTE_SEARCH_CENTERS", "7")))
+        register_dynamic_route(segment, endpoint, route_points, regions, {"mode": "route", "origin": origin, "destination": destination})
+        return segment, {
+            "mode": "route",
+            "origin": o,
+            "destination": d,
+            "route_points_count": len(route_points),
+            "search_radius_km": radius,
+            "search_centers_count": len(regions),
+        }
+
+    raise HTTPException(
+        status_code=400,
+        detail="Modo viaje incompleto. Usa /recommend?mode=city&city=Bilbao o /recommend?mode=route&origin=Anchuelo&destination=Bilbao.",
+    )
+
+
+
 def station_matches(row: dict[str, Any], station_cfg: dict[str, Any]) -> bool:
     municipio = norm(get_field(row, "Municipio", "municipio", "localidad", "Localidad", "city", "poblacion"))
     rotulo = norm(get_field(row, "Rótulo", "Rotulo", "rotulo", "nombre", "Nombre", "marca", "Marca", "brand"))
@@ -482,7 +731,17 @@ def point_polyline_distance_km(point: tuple[float, float], points: list[tuple[fl
 
 
 def route_corridor_points(segment: str) -> list[tuple[float, float]]:
-    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    endpoint = get_route_endpoint(segment) or ROUTE_ENDPOINTS["forus_return"]
+    dynamic_points = DYNAMIC_ROUTE_POINTS.get(segment)
+    if dynamic_points:
+        result: list[tuple[float, float]] = []
+        for p in dynamic_points:
+            try:
+                result.append((float(p["lat"]), float(p["lon"])))
+            except Exception:
+                pass
+        if len(result) >= 2:
+            return result
     origin = (float(endpoint["origin_lat"]), float(endpoint["origin_lon"]))
     destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
 
@@ -498,11 +757,12 @@ def route_corridor_points(segment: str) -> list[tuple[float, float]]:
 
 
 def extract_precioil_rows_dynamic(items: list[dict[str, Any]], segment: str) -> list[dict[str, Any]]:
-    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    endpoint = get_route_endpoint(segment) or ROUTE_ENDPOINTS["forus_return"]
     route_points = route_corridor_points(segment)
     destination = (float(endpoint["destination_lat"]), float(endpoint["destination_lon"]))
-    route_max_km = float(os.environ.get("ROUTE_CORRIDOR_MAX_KM", "8.0"))
-    destination_max_km = float(os.environ.get("DESTINATION_NEAR_MAX_KM", "8.0"))
+    is_city_mode = endpoint.get("travel_mode") == "city"
+    route_max_km = float(os.environ.get("TRAVEL_ROUTE_CORRIDOR_MAX_KM" if segment in DYNAMIC_ROUTE_ENDPOINTS else "ROUTE_CORRIDOR_MAX_KM", "10.0" if segment in DYNAMIC_ROUTE_ENDPOINTS else "8.0"))
+    destination_max_km = float(os.environ.get("TRAVEL_DESTINATION_NEAR_MAX_KM" if segment in DYNAMIC_ROUTE_ENDPOINTS else "DESTINATION_NEAR_MAX_KM", "15.0" if is_city_mode else ("10.0" if segment in DYNAMIC_ROUTE_ENDPOINTS else "8.0")))
 
     rows: list[dict[str, Any]] = []
     fetched_timestamp = datetime.now().isoformat(timespec="seconds")
@@ -596,6 +856,9 @@ def extract_relevant_rows_precioil(payload: Any) -> list[dict[str, Any]]:
 
 
 def precioil_regions_for_segment(segment: str = "all") -> list[str]:
+    if segment in DYNAMIC_SEARCH_REGIONS:
+        return [str(r.get("name") or f"travel_{idx}") for idx, r in enumerate(DYNAMIC_SEARCH_REGIONS[segment], start=1)]
+
     # Se consultan varias áreas amplias y luego se filtra por cercanía real al trayecto/destino.
     # Importante: el radio ampliado solo ayuda si consultamos más de un centro, porque Precioil
     # puede limitar el número de resultados por petición. Por eso dividimos el corredor en zonas.
@@ -630,11 +893,19 @@ async def fetch_precioil_relevant_rows(segment: str = "all") -> tuple[Any, list[
     all_items: list[dict[str, Any]] = []
     region_errors: dict[str, str] = {}
 
-    for region_name in precioil_regions_for_segment(segment):
+    if segment in DYNAMIC_SEARCH_REGIONS:
+        region_iter = [
+            (str(region.get("name") or f"travel_{idx}"), {k: v for k, v in region.items() if k != "name"})
+            for idx, region in enumerate(DYNAMIC_SEARCH_REGIONS[segment], start=1)
+        ]
+    else:
+        region_iter = [(region_name, PRECIOIL_REGIONS[region_name]) for region_name in precioil_regions_for_segment(segment)]
+
+    for region_name, region_params in region_iter:
         try:
             payload = await fetch_precioil_json(
                 "/estaciones/radio",
-                params=PRECIOIL_REGIONS[region_name],
+                params=region_params,
             )
             for item in precioil_station_items(payload):
                 item = dict(item)
@@ -1116,7 +1387,10 @@ def _append_point(points: list[dict[str, Any]], lat: Any, lon: Any, label: str =
 def build_visual_route_points(segment: str, endpoint: dict[str, Any], recommended: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     points: list[dict[str, Any]] = []
     _append_point(points, endpoint.get("origin_lat"), endpoint.get("origin_lon"), "Origen")
-    hints = ROUTE_ROAD_HINTS.get(segment, [])
+    if segment in DYNAMIC_ROUTE_POINTS:
+        hints = DYNAMIC_ROUTE_POINTS.get(segment, [])[1:-1]
+    else:
+        hints = ROUTE_ROAD_HINTS.get(segment, [])
     rec_lat, rec_lon = station_lat_lon(recommended) if recommended else (None, None)
     if rec_lat is not None and rec_lon is not None:
         for p in hints:
@@ -1236,7 +1510,7 @@ def render_map_svg(segment: str, result: dict[str, Any], map_payload: dict[str, 
 
 
 def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
-    endpoint = ROUTE_ENDPOINTS.get(segment, ROUTE_ENDPOINTS["forus_return"])
+    endpoint = get_route_endpoint(segment) or ROUTE_ENDPOINTS["forus_return"]
     recommended = result.get("recommended") if isinstance(result.get("recommended"), dict) else None
     alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
     stations = ([recommended] if recommended else []) + alternatives
@@ -1250,7 +1524,7 @@ def build_map_payload(segment: str, result: dict[str, Any]) -> dict[str, Any]:
         "type": "visual_map_links",
         "note": "Informe breve con mapa interactivo, ruta directa a Apple Maps y resumen meteorológico. La ruta del mapa es visual; Google/Apple calculan la navegación real con las direcciones exactas.",
         "summary": f"{endpoint['origin_name']} → {endpoint['destination_name']} · Recomendada: {recommended_name}" + (f" ({recommended_price:.3f} €/l)" if isinstance(recommended_price, (int, float)) else ""),
-        "visual_map_url": f"{PUBLIC_BASE_URL}/map?segment={quote_plus(segment)}",
+        "visual_map_url": f"{PUBLIC_BASE_URL}/map?{dynamic_map_query(segment)}",
         "apple_maps_route": apple_route,
         "apple_maps_recommended_route": apple_route,
         "apple_maps_recommended_station": apple_station,
@@ -1310,6 +1584,11 @@ def segment_weather_title(segment: str) -> str:
         return "🏢 Ida Anchuelo → DSV/Cabanillas"
     if segment == "cabanillas_return":
         return "🏢 Vuelta DSV/Cabanillas → Anchuelo"
+    endpoint = get_route_endpoint(segment)
+    if isinstance(endpoint, dict) and endpoint.get("travel_mode") == "city":
+        return f"⛽ Gasolina en {endpoint.get('travel_label') or endpoint.get('destination_name') or 'ciudad'}"
+    if isinstance(endpoint, dict) and endpoint.get("travel_mode") == "route":
+        return f"🏍️ Ruta {endpoint.get('travel_label') or segment}"
     if segment == "alcala":
         return "🏍️ Trayecto Alcalá"
     return f"🏍️ Trayecto {segment}"
@@ -1386,7 +1665,7 @@ def _route_weather_target(segment: str, at: datetime | None = None) -> tuple[dic
     if target.tzinfo is None:
         target = target.replace(tzinfo=ZoneInfo(tz_name))
 
-    endpoint = ROUTE_ENDPOINTS.get(segment)
+    endpoint = get_route_endpoint(segment)
     if not endpoint:
         return None, target, None, None, tz_name
 
@@ -1705,7 +1984,7 @@ async def fetch_route_weather_open_meteo(segment: str, at: datetime | None = Non
     if target.tzinfo is None:
         target = target.replace(tzinfo=ZoneInfo(tz_name))
 
-    endpoint = ROUTE_ENDPOINTS.get(segment)
+    endpoint = get_route_endpoint(segment)
     if not endpoint:
         return _weather_error_payload(
             segment,
@@ -2087,11 +2366,15 @@ async def build_weather_summary_payload(
     next_block = weather_text_block(next_segment, next_weather) if next_segment else None
 
     lines: list[str] = []
-    lines.append("Trayectos previstos:")
-    current_endpoint = ROUTE_ENDPOINTS.get(current_segment, ROUTE_ENDPOINTS["forus_out"])
-    lines.append(f"🏍️ {current_endpoint['origin_name']} → {current_endpoint['destination_name']}")
+    current_endpoint = get_route_endpoint(current_segment) or ROUTE_ENDPOINTS["forus_out"]
+    if current_endpoint.get("travel_mode") == "city":
+        lines.append("Búsqueda por ciudad:")
+        lines.append(f"⛽ {current_endpoint.get('travel_label') or current_endpoint['destination_name']}")
+    else:
+        lines.append("Trayectos previstos:")
+        lines.append(f"🏍️ {current_endpoint['origin_name']} → {current_endpoint['destination_name']}")
     if next_segment:
-        next_endpoint = ROUTE_ENDPOINTS.get(next_segment, ROUTE_ENDPOINTS["forus_return"])
+        next_endpoint = get_route_endpoint(next_segment) or ROUTE_ENDPOINTS["forus_return"]
         lines.append(f"🏍️ {next_endpoint['origin_name']} → {next_endpoint['destination_name']}")
 
     for block in [current_block, next_block]:
@@ -2892,7 +3175,6 @@ async def prices(
                 "status": "ok",
                 "source": "precioil",
                 "segment": segment,
-                **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
                 "regions_used": precioil_regions_for_segment(segment),
                 "count": len(rows),
                 "stations": rows,
@@ -2931,15 +3213,97 @@ async def prices(
 
     raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
 
+
+def ordered_map_links(map_payload: dict[str, Any]) -> list[dict[str, str]]:
+    candidates = [
+        ("Mapa visual", map_payload.get("visual_map_url")),
+        ("Apple Maps — ruta", map_payload.get("apple_maps_route")),
+        ("Apple Maps — estación", map_payload.get("apple_maps_recommended_station")),
+        ("Google Maps — ruta recomendada", map_payload.get("google_maps_recommended_route")),
+        ("Google Maps — ruta con alternativas", map_payload.get("google_maps_all_candidates_route")),
+    ]
+    return [{"label": label, "url": str(url)} for label, url in candidates if url]
+
+
+def build_report_text(
+    segment: str,
+    result: dict[str, Any],
+    map_payload: dict[str, Any],
+    weather_summary: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
+) -> str:
+    endpoint = get_route_endpoint(segment) or ROUTE_ENDPOINTS["forus_return"]
+    recommended = result.get("recommended") if isinstance(result.get("recommended"), dict) else {}
+    alternatives = [x for x in result.get("alternatives", []) if isinstance(x, dict)]
+
+    lines: list[str] = []
+    if endpoint.get("travel_mode") == "city":
+        lines.append(f"Informe gasolina — {endpoint.get('travel_label') or endpoint.get('destination_name')}")
+    elif endpoint.get("travel_mode") == "route":
+        lines.append(f"Informe gasolina — {endpoint.get('origin_name')} → {endpoint.get('destination_name')}")
+    else:
+        lines.append(f"Informe gasolina — {segment}")
+
+    lines.append("")
+    lines.append("Recomendación")
+    if recommended:
+        lines.append(f"Repostar en {recommended.get('station_name') or recommended.get('station_key') or 'N/D'}.")
+        lines.append(f"Dirección: {recommended.get('address') or 'N/D'} · {recommended.get('municipality') or ''}".strip())
+        lines.append(f"SP95: {format_price_label(recommended.get('price'))}")
+        lines.append(f"Actualizado: {recommended.get('official_timestamp') or 'N/D'}")
+        if recommended.get("trust_note"):
+            lines.append(str(recommended.get("trust_note")))
+    else:
+        lines.append("No hay recomendación con precio disponible.")
+
+    if isinstance(decision, dict) and decision.get("reason"):
+        lines.append("")
+        lines.append(f"Decisión: {decision.get('reason')}")
+
+    if alternatives:
+        lines.append("")
+        lines.append("Alternativas")
+        for alt in alternatives[:4]:
+            lines.append(
+                f"- {alt.get('station_name') or alt.get('station_key')}: "
+                f"{format_price_label(alt.get('price'))} · {alt.get('address') or ''} · {alt.get('municipality') or ''}".strip()
+            )
+
+    if isinstance(weather_summary, dict) and weather_summary.get("summary_text"):
+        lines.append("")
+        lines.append("Tiempo")
+        lines.append(str(weather_summary.get("summary_text")))
+
+    links = ordered_map_links(map_payload)
+    if links:
+        lines.append("")
+        lines.append("Enlaces")
+        for item in links:
+            lines.append(f"- {item['label']}: {item['url']}")
+
+    return "\n".join(lines)
+
+
 @app.get("/recommend")
 async def recommend(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
+    mode: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    origin: str | None = Query(default=None),
+    destination: str | None = Query(default=None),
 ) -> dict[str, Any]:
     # source: precioil | official | auto
     # Precioil queda como fuente principal. La oficial solo se usa si se pide explícitamente o como fallback en auto.
     requested_segment = segment
-    segment, auto_debug = await resolve_auto_segment_info(segment)
+    travel_debug: dict[str, Any] = {}
+    travel_segment, travel_debug = await resolve_travel_segment(mode=mode, city=city, origin=origin, destination=destination)
+    if travel_segment:
+        segment = travel_segment
+        auto_debug = {}
+        requested_segment = travel_segment
+    else:
+        segment, auto_debug = await resolve_auto_segment_info(segment)
     if segment == "no_route":
         return {
             "status": "no_route",
@@ -2948,6 +3312,7 @@ async def recommend(
             "segment": segment,
             "message": "No hay trayectos próximos relevantes en el calendario.",
             **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                    **({"travel_debug": travel_debug} if travel_debug else {}),
         }
     precioil_error: Any = None
 
@@ -2984,6 +3349,8 @@ async def recommend(
                     "calendar_route_plan": calendar_route_plan,
                     "decision": comparison,
                     "weather_summary": weather_summary,
+                    "links": ordered_map_links(current_map),
+                    "report_text": build_report_text(segment, result, current_map, weather_summary, comparison),
                     "current_route": {
                         "segment": segment,
                         "regions_used": precioil_regions_for_segment(segment),
@@ -3005,8 +3372,11 @@ async def recommend(
                     **result,
                     "map": current_map,
                     **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
                 }
 
+            map_payload = build_map_payload(segment, result)
+            weather_summary = await build_weather_summary_payload(segment)
             return {
                 "status": "ok",
                 "source": "precioil",
@@ -3017,9 +3387,12 @@ async def recommend(
                 "precioil_raw_items_count": len(items),
                 "region_errors": payload.get("region_errors", {}) if isinstance(payload, dict) else {},
                 **result,
-                "map": build_map_payload(segment, result),
-                "weather_summary": await build_weather_summary_payload(segment),
+                "map": map_payload,
+                "links": ordered_map_links(map_payload),
+                "weather_summary": weather_summary,
+                "report_text": build_report_text(segment, result, map_payload, weather_summary),
                 **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
             }
         except HTTPException as e:
             precioil_error = e.detail
@@ -3031,6 +3404,7 @@ async def recommend(
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
                     "segment": segment,
                     **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "Precioil falló y la fuente oficial no se usó porque source=precioil.",
@@ -3043,6 +3417,8 @@ async def recommend(
             rows = extract_relevant_rows(payload)
             save_observations(rows)
             result = choose_best(rows, segment)
+            map_payload = build_map_payload(segment, result)
+            weather_summary = await build_weather_summary_payload(segment)
             return {
                 "status": "degraded" if precioil_error else "ok",
                 "source": "official",
@@ -3051,8 +3427,12 @@ async def recommend(
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
                 "segment": segment,
                 **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
                 **result,
-                "map": build_map_payload(segment, result),
+                "map": map_payload,
+                "links": ordered_map_links(map_payload),
+                "weather_summary": weather_summary,
+                "report_text": build_report_text(segment, result, map_payload, weather_summary),
             }
         except HTTPException as official_error:
             if source == "official":
@@ -3063,6 +3443,7 @@ async def recommend(
                     "fetched_at": datetime.now().isoformat(timespec="seconds"),
                     "segment": segment,
                     **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
                     "recommended": manual_fallback(segment),
                     "alternatives": [],
                     "warning": "La fuente oficial falló y Precioil no se usó porque source=official.",
@@ -3077,6 +3458,7 @@ async def recommend(
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
                 "segment": segment,
                 **({"auto_debug": auto_debug} if requested_segment == "auto" else {}),
+                **({"travel_debug": travel_debug} if travel_debug else {}),
                 "recommended": manual_fallback(segment),
                 "alternatives": [],
                 "warning": "Fallaron Precioil y fuente oficial.",
@@ -3090,9 +3472,14 @@ async def recommend(
 async def map_image(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
+    mode: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    origin: str | None = Query(default=None),
+    destination: str | None = Query(default=None),
 ) -> Response:
     requested_segment = segment
-    segment = await resolve_auto_segment(segment)
+    travel_segment, _travel_debug = await resolve_travel_segment(mode=mode, city=city, origin=origin, destination=destination)
+    segment = travel_segment or await resolve_auto_segment(segment)
     if segment == "no_route":
         raise HTTPException(status_code=404, detail="No hay trayectos próximos relevantes en el calendario.")
 
@@ -3118,9 +3505,14 @@ async def map_image(
 async def map_view(
     segment: str = Query(default="auto"),
     source: str = Query(default="precioil"),
+    mode: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    origin: str | None = Query(default=None),
+    destination: str | None = Query(default=None),
 ) -> HTMLResponse:
     requested_segment = segment
-    segment = await resolve_auto_segment(segment)
+    travel_segment, _travel_debug = await resolve_travel_segment(mode=mode, city=city, origin=origin, destination=destination)
+    segment = travel_segment or await resolve_auto_segment(segment)
     if segment == "no_route":
         return HTMLResponse(
             "<html><body><h1>Sin trayecto próximo</h1><p>No hay trayectos próximos relevantes en el calendario.</p></body></html>",
@@ -3143,7 +3535,9 @@ async def map_view(
     map_payload = build_map_payload(segment, result)
     calendar_route_plan = await resolve_current_and_next_segments_from_calendar() if env_bool("PUBLIC_CALENDAR_ENABLED", True) else {}
     next_segment = calendar_route_plan.get("next_segment") if isinstance(calendar_route_plan, dict) else None
-    if not isinstance(next_segment, str) or next_segment not in ROUTE_ENDPOINTS or next_segment == segment:
+    if segment in DYNAMIC_ROUTE_ENDPOINTS:
+        next_segment = None
+    elif not route_known(next_segment) or next_segment == segment:
         next_segment = next_segment_for(segment)
     weather_panel = await build_weather_panel_html(segment, next_segment, calendar_route_plan)
     return HTMLResponse(render_visual_map_html(segment, result, map_payload, weather_panel))
