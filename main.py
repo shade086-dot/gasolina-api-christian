@@ -3826,6 +3826,331 @@ async def recommend(
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Cron/ntfy endpoint for external schedulers (cron-job.org)
+# ---------------------------------------------------------------------------
+
+def ntfy_pick_link(payload: dict[str, Any], label_contains: str) -> str | None:
+    needle = label_contains.lower()
+    for link in payload.get("links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        label = str(link.get("label", "")).lower()
+        if needle in label and link.get("url"):
+            return str(link.get("url"))
+
+    map_data = payload.get("map") if isinstance(payload.get("map"), dict) else {}
+    if needle == "mapa":
+        return map_data.get("visual_map_url")
+    if needle == "apple":
+        return map_data.get("apple_maps_recommended_route") or map_data.get("apple_maps_route") or map_data.get("apple_maps_recommended_station")
+    if needle == "google":
+        return map_data.get("google_maps_recommended_route") or map_data.get("google_maps_all_candidates_route")
+    return None
+
+
+def ntfy_compact_route_title(payload: dict[str, Any]) -> str:
+    """Título corto del trayecto/ciudad para ntfy."""
+    map_data = payload.get("map") if isinstance(payload.get("map"), dict) else {}
+    origin = (map_data.get("origin") or {}).get("name") or ""
+    destination = (map_data.get("destination") or {}).get("name") or ""
+    segment = str(payload.get("segment") or "")
+
+    if origin and destination:
+        if segment.startswith("travel_city_"):
+            city = destination.replace("Zona ", "").strip() or origin.replace("Centro de ", "").strip()
+            if city:
+                return f"Gasolina en {city}"
+        if origin != destination:
+            return f"{origin} → {destination}"
+
+    summary = str(map_data.get("summary") or "")
+    if "· Recomendada:" in summary:
+        summary = summary.split("· Recomendada:", 1)[0].strip()
+    if summary:
+        return summary
+
+    weather = payload.get("weather_summary") if isinstance(payload.get("weather_summary"), dict) else {}
+    current = weather.get("current") if isinstance(weather.get("current"), dict) else {}
+    title = str(current.get("title") or "").strip()
+    if title:
+        return title
+
+    names = {
+        "cabanillas_out": "Ida Anchuelo → DSV/Cabanillas",
+        "cabanillas_return": "Vuelta DSV/Cabanillas → Anchuelo",
+        "forus_out": "Ida a Forus",
+        "forus_return": "Vuelta Forus → Anchuelo",
+        "alcala": "Trayecto Alcalá",
+        "auto": "Ruta automática",
+    }
+    return names.get(segment, segment or "Informe gasolina")
+
+
+def ntfy_short_text(value: Any, max_len: int = 80) -> str:
+    value = " ".join(str(value or "").split())
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1].rstrip() + "…"
+
+
+def ntfy_header_value(value: Any, max_len: int = 180) -> str:
+    """Cabecera segura para HTTP/ntfy, conservando legibilidad del trayecto."""
+    text = str(value or "")
+    replacements = {
+        "€": "EUR",
+        "→": "->",
+        "←": "<-",
+        "—": "-",
+        "–": "-",
+        "·": "-",
+        "⛽": "",
+        "🏍️": "",
+        "🏢": "",
+        "☀️": "",
+        "🌤️": "",
+        "🌥️": "",
+        "🥵": "",
+        "✅": "",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = " ".join(text.split())
+    return text[:max_len] or "Gasolina"
+
+
+def ntfy_build_actions(map_url: str | None, apple_url: str | None, google_url: str | None) -> str | None:
+    include_actions = env_bool("NTFY_INCLUDE_ACTIONS", True)
+    if not include_actions:
+        return None
+
+    actions: list[str] = []
+    if map_url:
+        actions.append(f"view, Mapa visual, {map_url}, clear=true")
+    if apple_url:
+        actions.append(f"view, Apple Maps, {apple_url}")
+    if google_url:
+        actions.append(f"view, Google Maps, {google_url}")
+
+    if not actions:
+        return None
+
+    full = "; ".join(actions)
+    # Evita cabeceras enormes por Google Maps con muchos waypoints.
+    if len(full) > 3500 and map_url:
+        return f"view, Mapa visual, {map_url}, clear=true"
+    return full
+
+
+def build_cron_ntfy_message(payload: dict[str, Any]) -> tuple[str, str, str | None, str | None, str | None]:
+    """Construye título, cuerpo y enlaces para ntfy sin mostrar URLs largas."""
+    result = payload
+    if isinstance(payload.get("current_route"), dict) and isinstance(payload["current_route"].get("result"), dict):
+        result = payload["current_route"]["result"]
+
+    recommended = result.get("recommended") if isinstance(result, dict) else None
+    if not isinstance(recommended, dict):
+        recommended = payload.get("recommended") if isinstance(payload.get("recommended"), dict) else {}
+
+    station = recommended.get("station_name") or recommended.get("name") or "Sin recomendación"
+    price = recommended.get("price", "?")
+    address = recommended.get("address") or ""
+    municipality = recommended.get("municipality") or ""
+    updated = recommended.get("official_timestamp") or recommended.get("updated_at") or ""
+    trust = recommended.get("trust_note") or ""
+
+    decision = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
+    reason = decision.get("reason") or ""
+
+    weather = payload.get("weather_summary") if isinstance(payload.get("weather_summary"), dict) else {}
+    current_weather = weather.get("current") if isinstance(weather.get("current"), dict) else {}
+    weather_result = current_weather.get("result") or ""
+    weather_bullets = current_weather.get("bullets") or []
+    weather_lines = "\n".join(f"- {item}" for item in weather_bullets[:4]) if isinstance(weather_bullets, list) else ""
+
+    alternatives = []
+    alts = result.get("alternatives") if isinstance(result, dict) else payload.get("alternatives")
+    for alt in (alts or [])[:3]:
+        if not isinstance(alt, dict):
+            continue
+        alternatives.append(f"- {alt.get('station_name','?')}: {alt.get('price','?')} €/l · {alt.get('municipality','')}")
+    alternatives_text = "\n".join(alternatives)
+
+    map_url = ntfy_pick_link(payload, "mapa")
+    apple_url = ntfy_pick_link(payload, "apple")
+    google_url = ntfy_pick_link(payload, "google")
+
+    route_title = ntfy_compact_route_title(payload)
+    title = ntfy_short_text(f"{route_title} · SP95 {price} €/l", 80)
+
+    parts = [
+        f"⛽ {station}",
+        f"SP95: {price} €/l",
+    ]
+    location = f"{address} · {municipality}".strip(" ·")
+    if location:
+        parts.append(location)
+    if updated:
+        parts.append(f"Actualizado: {updated}")
+    if trust:
+        parts.append(str(trust))
+    if reason:
+        parts.append("")
+        parts.append(f"Decisión: {reason}")
+    if weather_result or weather_lines:
+        parts.append("")
+        parts.append(f"Tiempo: {weather_result}")
+        if weather_lines:
+            parts.append(weather_lines)
+    if alternatives_text:
+        parts.append("")
+        parts.append("Alternativas:")
+        parts.append(alternatives_text)
+
+    if map_url:
+        parts.append("")
+        parts.append("Enlaces: toca la notificación para abrir el mapa visual.")
+        if env_bool("NTFY_INCLUDE_ACTIONS", True):
+            parts.append("Botones disponibles: Mapa visual, Apple Maps y Google Maps.")
+
+    return title, "\n".join(parts), map_url, apple_url, google_url
+
+
+async def publish_ntfy_notification_rich(
+    title: str,
+    message: str,
+    click_url: str | None = None,
+    map_url: str | None = None,
+    apple_url: str | None = None,
+    google_url: str | None = None,
+) -> dict[str, Any]:
+    topic = os.getenv("NTFY_TOPIC", "").strip()
+    if not topic:
+        raise HTTPException(status_code=500, detail="Falta configurar NTFY_TOPIC en variables de entorno.")
+
+    server_url = os.getenv("NTFY_SERVER_URL", "https://ntfy.sh").rstrip("/")
+    url = f"{server_url}/{quote_plus(topic)}"
+
+    headers = {
+        "Title": ntfy_header_value(title, 120),
+        "Priority": ntfy_header_value(os.getenv("NTFY_PRIORITY", "default"), 30),
+        "Tags": ntfy_header_value(os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"), 120),
+    }
+    if click_url:
+        headers["Click"] = str(click_url)
+
+    actions = ntfy_build_actions(map_url, apple_url, google_url)
+    if actions:
+        headers["Actions"] = actions
+
+    token = os.getenv("NTFY_TOKEN", "").strip()
+    user = os.getenv("NTFY_USER", "").strip()
+    password = os.getenv("NTFY_PASSWORD", "").strip()
+    auth = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif user and password:
+        auth = (user, password)
+
+    timeout = float(os.getenv("NTFY_TIMEOUT_SECONDS", "30"))
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, content=message.encode("utf-8"), headers=headers, auth=auth)
+
+    if response.status_code >= 300:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "ntfy devolvió error al publicar la notificación.",
+                "status_code": response.status_code,
+                "body": response.text[:1000],
+            },
+        )
+
+    try:
+        ntfy_response = response.json()
+    except Exception:
+        ntfy_response = {"raw": response.text[:500]}
+
+    return {
+        "status": "sent",
+        "ntfy_status_code": response.status_code,
+        "ntfy_response": ntfy_response,
+    }
+
+
+async def run_recommend_for_notify(
+    segment: str,
+    source: str,
+    mode: str | None,
+    city: str | None,
+    origin: str | None,
+    destination: str | None,
+) -> dict[str, Any]:
+    payload = await recommend(
+        segment=segment,
+        source=source,
+        mode=mode,
+        city=city,
+        origin=origin,
+        destination=destination,
+    )
+    if payload.get("status") not in ("ok", "fallback"):
+        raise HTTPException(status_code=502, detail={"message": "El informe no devolvió ok.", "payload": payload})
+    return payload
+
+
+@app.get("/cron-notify")
+async def cron_notify(
+    segment: str = Query(default="auto"),
+    source: str = Query(default="precioil"),
+    mode: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    origin: str | None = Query(default=None),
+    destination: str | None = Query(default=None),
+    secret: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Endpoint pensado para cron-job.org: informe + notificación ntfy en una sola URL."""
+    verify_notify_secret(secret)
+
+    payload = await run_recommend_for_notify(
+        segment=segment,
+        source=source,
+        mode=mode,
+        city=city,
+        origin=origin,
+        destination=destination,
+    )
+    title, message, map_url, apple_url, google_url = build_cron_ntfy_message(payload)
+    ntfy_result = await publish_ntfy_notification_rich(
+        title=title,
+        message=message,
+        click_url=map_url,
+        map_url=map_url,
+        apple_url=apple_url,
+        google_url=google_url,
+    )
+
+    return {
+        "status": "ok",
+        "mode": mode,
+        "segment": payload.get("segment"),
+        "title": title,
+        "message_preview": message[:1000],
+        "click_url": map_url,
+        "links": {
+            "mapa_visual": map_url,
+            "apple_maps": apple_url,
+            "google_maps": google_url,
+        },
+        "notification": ntfy_result,
+    }
+
+
+
 @app.get("/notify")
 async def notify(
     segment: str = Query(default="auto"),
@@ -3848,15 +4173,27 @@ async def notify(
         destination=destination,
     )
 
-    title, message, click_url = build_ntfy_message(payload)
-    ntfy_result = await publish_ntfy_notification(title, message, click_url)
+    title, message, map_url, apple_url, google_url = build_cron_ntfy_message(payload)
+    ntfy_result = await publish_ntfy_notification_rich(
+        title=title,
+        message=message,
+        click_url=map_url,
+        map_url=map_url,
+        apple_url=apple_url,
+        google_url=google_url,
+    )
 
     return {
         "status": "ok",
         "notification": ntfy_result,
         "title": title,
         "message_preview": message[:1000],
-        "click_url": click_url,
+        "click_url": map_url,
+        "links": {
+            "mapa_visual": map_url,
+            "apple_maps": apple_url,
+            "google_maps": google_url,
+        },
         "recommendation": {
             "segment": payload.get("segment"),
             "source": payload.get("source"),
