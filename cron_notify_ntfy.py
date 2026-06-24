@@ -17,6 +17,7 @@ SEGMENT = os.getenv("GASOLINA_SEGMENT", "auto").strip() or "auto"
 
 # Si lo pones a false, solo usará el "click" principal al mapa visual.
 NTFY_INCLUDE_ACTIONS = os.getenv("NTFY_INCLUDE_ACTIONS", "true").lower() not in {"0", "false", "no"}
+NTFY_ICON_URL = os.getenv("NTFY_ICON_URL", "").strip()
 
 
 def get_json(url: str, timeout: int = 300) -> dict:
@@ -32,6 +33,7 @@ def ascii_header(value: str, max_len: int = 200) -> str:
 def build_ntfy_actions(map_url: str | None, apple_url: str | None, google_url: str | None) -> str | None:
     """
     Crea botones en ntfy sin mostrar URLs largas en el texto.
+    El orden queda forzado con prefijos numéricos: 1 Mapa, 2 Apple, 3 Google.
     Si la cabecera queda demasiado larga, deja solo el mapa visual para evitar errores HTTP.
     """
     if not NTFY_INCLUDE_ACTIONS:
@@ -39,11 +41,11 @@ def build_ntfy_actions(map_url: str | None, apple_url: str | None, google_url: s
 
     actions = []
     if map_url:
-        actions.append(f"view, Mapa visual, {map_url}, clear=true")
+        actions.append(f"view, 1 Mapa visual, {map_url}, clear=true")
     if apple_url:
-        actions.append(f"view, Apple Maps, {apple_url}")
+        actions.append(f"view, 2 Apple Maps, {apple_url}")
     if google_url:
-        actions.append(f"view, Google Maps, {google_url}")
+        actions.append(f"view, 3 Google Maps, {google_url}")
 
     if not actions:
         return None
@@ -52,7 +54,7 @@ def build_ntfy_actions(map_url: str | None, apple_url: str | None, google_url: s
 
     # Evita cabeceras enormes, sobre todo con rutas de Google con muchos waypoints.
     if len(full) > 3500 and map_url:
-        return f"view, Mapa visual, {map_url}, clear=true"
+        return f"view, 1 Mapa visual, {map_url}, clear=true"
     return full
 
 
@@ -121,6 +123,10 @@ def post_ntfy(
         "Priority": os.getenv("NTFY_PRIORITY", "default"),
         "Tags": os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"),
     }
+
+    # Icono personalizado de la notificación. No cambia el icono de la app ntfy instalada.
+    if NTFY_ICON_URL:
+        headers["Icon"] = NTFY_ICON_URL
 
     # Al tocar la notificación se abre el mapa visual.
     if click_url:
@@ -223,7 +229,7 @@ def build_message(data: dict) -> tuple[str, str, str | None, str | None, str | N
     if map_url:
         parts.append("\nEnlaces: toca la notificación para abrir el mapa visual.")
         if NTFY_INCLUDE_ACTIONS:
-            parts.append("También deberían aparecer botones: Mapa visual, Apple Maps y Google Maps.")
+            parts.append("También deberían aparecer botones: 1 Mapa visual, 2 Apple Maps y 3 Google Maps.")
 
     return title, "\n".join(parts), map_url, apple_url, google_url
 
