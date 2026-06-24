@@ -15,21 +15,70 @@ ORIGIN = os.getenv("GASOLINA_ORIGIN", "").strip()
 DESTINATION = os.getenv("GASOLINA_DESTINATION", "").strip()
 SEGMENT = os.getenv("GASOLINA_SEGMENT", "auto").strip() or "auto"
 
+# Si lo pones a false, solo usará el "click" principal al mapa visual.
+NTFY_INCLUDE_ACTIONS = os.getenv("NTFY_INCLUDE_ACTIONS", "true").lower() not in {"0", "false", "no"}
+
 
 def get_json(url: str, timeout: int = 300) -> dict:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def post_ntfy(title: str, message: str, click_url: str | None = None) -> str:
+def ascii_header(value: str, max_len: int = 200) -> str:
+    """ntfy permite UTF-8 en el cuerpo, pero las cabeceras HTTP conviene dejarlas ASCII."""
+    return value.encode("ascii", "ignore").decode("ascii")[:max_len]
+
+
+def build_ntfy_actions(map_url: str | None, apple_url: str | None, google_url: str | None) -> str | None:
+    """
+    Crea botones en ntfy sin mostrar URLs largas en el texto.
+    Si la cabecera queda demasiado larga, deja solo el mapa visual para evitar errores HTTP.
+    """
+    if not NTFY_INCLUDE_ACTIONS:
+        return None
+
+    actions = []
+    if map_url:
+        actions.append(f"view, Mapa visual, {map_url}, clear=true")
+    if apple_url:
+        actions.append(f"view, Apple Maps, {apple_url}")
+    if google_url:
+        actions.append(f"view, Google Maps, {google_url}")
+
+    if not actions:
+        return None
+
+    full = "; ".join(actions)
+
+    # Evita cabeceras enormes, sobre todo con rutas de Google con muchos waypoints.
+    if len(full) > 3500 and map_url:
+        return f"view, Mapa visual, {map_url}, clear=true"
+    return full
+
+
+def post_ntfy(
+    title: str,
+    message: str,
+    click_url: str | None = None,
+    map_url: str | None = None,
+    apple_url: str | None = None,
+    google_url: str | None = None,
+) -> str:
     url = f"{NTFY_SERVER_URL}/{urllib.parse.quote(NTFY_TOPIC)}"
+
     headers = {
-        "Title": title.encode("ascii", "ignore").decode("ascii")[:80] or "Gasolina",
+        "Title": ascii_header(title, 80) or "Gasolina",
         "Priority": os.getenv("NTFY_PRIORITY", "default"),
         "Tags": os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"),
     }
+
+    # Al tocar la notificación se abre el mapa visual.
     if click_url:
         headers["Click"] = click_url
+
+    actions = build_ntfy_actions(map_url, apple_url, google_url)
+    if actions:
+        headers["Actions"] = actions
 
     req = urllib.request.Request(
         url,
@@ -63,10 +112,14 @@ def pick_link(data: dict, label_contains: str) -> str | None:
     map_data = data.get("map") or {}
     if label_contains.lower() == "mapa":
         return map_data.get("visual_map_url")
+    if label_contains.lower() == "apple":
+        return map_data.get("apple_maps_recommended_route") or map_data.get("apple_maps_route")
+    if label_contains.lower() == "google":
+        return map_data.get("google_maps_recommended_route")
     return None
 
 
-def build_message(data: dict) -> tuple[str, str, str | None]:
+def build_message(data: dict) -> tuple[str, str, str | None, str | None, str | None]:
     rec = data.get("recommended") or {}
     decision = data.get("decision") or {}
     weather = data.get("weather_summary") or {}
@@ -80,7 +133,6 @@ def build_message(data: dict) -> tuple[str, str, str | None]:
     trust = rec.get("trust_note", "")
     reason = decision.get("reason", "")
 
-    segment = data.get("segment", "")
     title = f"Gasolina {price} eur/l"
 
     weather_result = current_weather.get("result", "")
@@ -115,14 +167,14 @@ def build_message(data: dict) -> tuple[str, str, str | None]:
             parts.append(weather_lines)
     if alternatives_text:
         parts.append(f"\nAlternativas:\n{alternatives_text}")
-    if map_url:
-        parts.append(f"\nMapa: {map_url}")
-    if apple_url:
-        parts.append(f"Apple Maps: {apple_url}")
-    if google_url:
-        parts.append(f"Google Maps: {google_url}")
 
-    return title, "\n".join(parts), map_url
+    # No mostramos URLs largas en el cuerpo. ntfy usará Click/Actions.
+    if map_url:
+        parts.append("\nEnlaces: toca la notificación para abrir el mapa visual.")
+        if NTFY_INCLUDE_ACTIONS:
+            parts.append("También deberían aparecer botones: Mapa visual, Apple Maps y Google Maps.")
+
+    return title, "\n".join(parts), map_url, apple_url, google_url
 
 
 def main() -> int:
@@ -138,8 +190,15 @@ def main() -> int:
             post_ntfy("Gasolina error", json.dumps(data, ensure_ascii=False)[:3000])
             return 2
 
-        title, message, click_url = build_message(data)
-        result = post_ntfy(title, message, click_url)
+        title, message, map_url, apple_url, google_url = build_message(data)
+        result = post_ntfy(
+            title,
+            message,
+            click_url=map_url,
+            map_url=map_url,
+            apple_url=apple_url,
+            google_url=google_url,
+        )
         print(result)
         return 0
 
