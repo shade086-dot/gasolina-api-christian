@@ -3361,6 +3361,21 @@ def build_ntfy_message(payload: dict[str, Any]) -> tuple[str, str, str | None]:
     return title[:120], "\n".join(lines), click_url
 
 
+
+def ascii_http_header_value(value: Any, max_len: int = 180) -> str:
+    """Return a conservative ASCII value for HTTP headers.
+
+    ntfy accepts rich UTF-8 text in the message body, but some HTTP client/server
+    combinations reject non-ASCII characters in headers such as Title.
+    """
+    text = str(value or "")
+    text = text.replace("€", "EUR")
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = " ".join(text.split())
+    return text[:max_len] or "Gasolina"
+
+
 async def publish_ntfy_notification(title: str, message: str, click_url: str | None = None) -> dict[str, Any]:
     topic = os.getenv("NTFY_TOPIC", "").strip()
     if not topic:
@@ -3370,12 +3385,14 @@ async def publish_ntfy_notification(title: str, message: str, click_url: str | N
     url = f"{server_url}/{quote_plus(topic)}"
 
     headers = {
-        "Title": title,
-        "Priority": os.getenv("NTFY_PRIORITY", "default"),
-        "Tags": os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"),
+        # Mantener cabeceras ASCII para evitar errores 500 por Unicode en HTTP headers.
+        # El cuerpo del mensaje sigue conservando emojis, acentos y símbolos.
+        "Title": ascii_http_header_value(title),
+        "Priority": ascii_http_header_value(os.getenv("NTFY_PRIORITY", "default"), max_len=30),
+        "Tags": ascii_http_header_value(os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"), max_len=120),
     }
     if click_url:
-        headers["Click"] = click_url
+        headers["Click"] = ascii_http_header_value(click_url, max_len=500)
 
     token = os.getenv("NTFY_TOKEN", "").strip()
     user = os.getenv("NTFY_USER", "").strip()
