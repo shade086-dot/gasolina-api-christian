@@ -12,6 +12,7 @@ from urllib.parse import quote_plus, urlencode, urlparse, parse_qs, unquote
 import html
 import math
 import hashlib
+import re
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
@@ -1154,6 +1155,194 @@ async def next_segment_from_calendar_or_fallback(current_segment: str) -> tuple[
     plan["decision_source"] = "fallback_no_future_calendar_occurrence"
     plan["fallback_next_segment"] = fallback
     return fallback, plan
+
+
+
+TRAVEL_EVENT_KEYWORDS = [
+    "viaje",
+    "vacaciones",
+    "vacacion",
+    "ruta",
+    "roadtrip",
+    "escapada",
+    "hotel",
+    "alojamiento",
+    "destino",
+    "gasolina",
+    "repostar",
+]
+
+KNOWN_ROUTINE_LOCATION_TERMS = [
+    "dsv",
+    "cabanillas",
+    "avenida la veguilla",
+    "forus",
+    "belvis",
+    "belvís",
+    "alcala forjas",
+    "alcalá forjas",
+    "calle almendros",
+    "anchuelo",
+]
+
+
+def _event_text_for_travel_detection(event: dict[str, Any]) -> str:
+    return "\n".join(
+        str(event.get(key) or "")
+        for key in ("summary", "location", "description")
+    ).strip()
+
+
+def _clean_travel_place(value: str) -> str:
+    text = " ".join(str(value or "").replace("\n", " ").replace("\r", " ").split())
+    text = re.sub(r"^(ubicaci[oó]n|location|destino|ciudad|city)\s*[:=-]\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*\|.*$", "", text)
+    text = text.strip(" .;,-")
+    return text
+
+
+def _contains_travel_keyword(text: str) -> bool:
+    ntext = norm(text)
+    return any(norm(keyword) in ntext for keyword in TRAVEL_EVENT_KEYWORDS)
+
+
+def _is_known_routine_location(text: str) -> bool:
+    ntext = norm(text)
+    return any(norm(term) in ntext for term in KNOWN_ROUTINE_LOCATION_TERMS)
+
+
+def parse_travel_route_from_text(text: str) -> tuple[str, str] | None:
+    """Detecta frases tipo:
+    - ruta de Madrid a Bilbao
+    - ruta desde Anchuelo hasta Soria
+    - Madrid -> Bilbao
+    - Anchuelo - Bilbao
+    """
+    raw = " ".join(str(text or "").replace("\n", " ").split())
+    if not raw:
+        return None
+
+    patterns = [
+        r"\b(?:ruta|viaje|trayecto|roadtrip)\s+(?:de|desde)\s+(.+?)\s+(?:a|hasta|->|→)\s+(.+?)(?:[.;|]|$)",
+        r"\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|->|→)\s+(.+?)(?:[.;|]|$)",
+        r"(.+?)\s*(?:->|→)\s*(.+?)(?:[.;|]|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.I)
+        if not match:
+            continue
+        origin = _clean_travel_place(match.group(1))
+        destination = _clean_travel_place(match.group(2))
+        # Evita falsos positivos de textos demasiado largos.
+        if 2 <= len(origin) <= 80 and 2 <= len(destination) <= 80:
+            return origin, destination
+
+    return None
+
+
+def parse_travel_city_from_event(event: dict[str, Any]) -> str | None:
+    """Detecta ciudad de viaje desde LOCATION o desde texto explícito.
+
+    Regla principal: si el evento contiene palabra de viaje/vacaciones y LOCATION
+    no parece una ubicación de rutina, LOCATION se usa como ciudad/zona.
+    """
+    summary = str(event.get("summary") or "")
+    location = _clean_travel_place(str(event.get("location") or ""))
+    description = str(event.get("description") or "")
+    combined = "\n".join([summary, location, description])
+
+    # Formatos explícitos en summary/description: "ciudad: Soria", "destino=Soria".
+    explicit = re.search(
+        r"\b(?:ciudad|city|destino|destination|zona)\s*[:=-]\s*([^.;\n|]+)",
+        combined,
+        flags=re.I,
+    )
+    if explicit:
+        city = _clean_travel_place(explicit.group(1))
+        if city and not _is_known_routine_location(city):
+            return city
+
+    if location and _contains_travel_keyword(combined) and not _is_known_routine_location(location):
+        return location
+
+    # Fallback conservador: "vacaciones en Soria" / "viaje a Soria".
+    fallback = re.search(
+        r"\b(?:vacaciones|viaje|escapada|destino)\s+(?:en|a|hacia)\s+([^.;\n|]+)",
+        combined,
+        flags=re.I,
+    )
+    if fallback:
+        city = _clean_travel_place(fallback.group(1))
+        if city and not _is_known_routine_location(city):
+            return city
+
+    return None
+
+
+async def detect_travel_from_calendar_events() -> tuple[dict[str, str] | None, dict[str, Any]]:
+    """Busca en el calendario un evento de viaje y lo traduce a mode=city o mode=route.
+
+    Prioridad:
+    1) texto explícito "ruta de A a B" en summary/location/description;
+    2) evento con palabra de viaje/vacaciones y LOCATION => city.
+    """
+    tz = local_tz()
+    now = datetime.now(tz)
+    horizon_days = int(os.environ.get("NEXT_CALENDAR_LOOKAHEAD_DAYS", "3"))
+    start_day = datetime.combine(now.date(), datetime.min.time(), tzinfo=tz)
+    events = await fetch_public_calendar_events_for_range(start_day, now + timedelta(days=horizon_days))
+
+    candidates: list[dict[str, Any]] = []
+    for event in events:
+        start = event.get("start")
+        end = event.get("end") or start
+        if isinstance(end, datetime) and end < now:
+            continue
+        when = start if isinstance(start, datetime) and start >= now else now
+        text = _event_text_for_travel_detection(event)
+
+        route = parse_travel_route_from_text(text)
+        if route:
+            origin, destination = route
+            candidates.append(
+                {
+                    "when": when,
+                    "params": {"mode": "route", "origin": origin, "destination": destination},
+                    "reason": "Detectado texto de ruta en evento de calendario.",
+                    "event": serialize_calendar_event(event),
+                }
+            )
+            continue
+
+        city = parse_travel_city_from_event(event)
+        if city:
+            candidates.append(
+                {
+                    "when": when,
+                    "params": {"mode": "city", "city": city},
+                    "reason": "Detectada ciudad/zona de viaje desde ubicación del evento.",
+                    "event": serialize_calendar_event(event),
+                }
+            )
+
+    candidates.sort(key=lambda item: item.get("when") or now)
+    if not candidates:
+        return None, {
+            "enabled": True,
+            "mode": None,
+            "events_checked": len(events),
+            "reason": "No se detectaron eventos de viaje explícitos.",
+        }
+
+    selected = candidates[0]
+    return selected["params"], {
+        "enabled": True,
+        "mode": selected["params"].get("mode"),
+        "events_checked": len(events),
+        "reason": selected.get("reason"),
+        "selected_event": selected.get("event"),
+        "params": selected.get("params"),
+    }
 
 
 def next_segment_for(current_segment: str) -> str:
@@ -3447,12 +3636,31 @@ async def recommend(
     requested_segment = segment
     travel_debug: dict[str, Any] = {}
     travel_segment, travel_debug = await resolve_travel_segment(mode=mode, city=city, origin=origin, destination=destination)
+
+    # Auto avanzado: si no se ha pedido mode/city/route explícito y el calendario
+    # contiene un evento de viaje, lo convertimos en búsqueda por ciudad o por ruta.
+    explicit_travel_request = bool((mode or "").strip() or (city or "").strip() or (origin or "").strip() or (destination or "").strip())
+    auto_travel_debug: dict[str, Any] | None = None
+    if not travel_segment and segment == "auto" and not explicit_travel_request and env_bool("CALENDAR_TRAVEL_AUTO_ENABLED", True):
+        travel_params, auto_travel_debug = await detect_travel_from_calendar_events()
+        if travel_params:
+            travel_segment, travel_debug = await resolve_travel_segment(
+                mode=travel_params.get("mode"),
+                city=travel_params.get("city"),
+                origin=travel_params.get("origin"),
+                destination=travel_params.get("destination"),
+            )
+            travel_debug["calendar_auto_travel"] = auto_travel_debug
+
     if travel_segment:
         segment = travel_segment
-        auto_debug = {}
+        auto_debug = {"calendar_auto_travel": auto_travel_debug} if auto_travel_debug else {}
         requested_segment = travel_segment
     else:
         segment, auto_debug = await resolve_auto_segment_info(segment)
+        if auto_travel_debug:
+            auto_debug = auto_debug or {}
+            auto_debug["calendar_auto_travel"] = auto_travel_debug
     if segment == "no_route":
         return {
             "status": "no_route",
