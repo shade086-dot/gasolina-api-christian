@@ -3284,6 +3284,138 @@ def build_report_text(
     return "\n".join(lines)
 
 
+
+
+def first_map_link(map_payload: dict[str, Any]) -> str | None:
+    links = ordered_map_links(map_payload)
+    for item in links:
+        if item.get("label") == "Mapa visual" and item.get("url"):
+            return str(item["url"])
+    if links and links[0].get("url"):
+        return str(links[0]["url"])
+    return None
+
+
+def build_ntfy_message(payload: dict[str, Any]) -> tuple[str, str, str | None]:
+    """Return (title, body, click_url) for ntfy."""
+    status = payload.get("status")
+    segment = payload.get("segment") or "auto"
+    result = payload
+    if isinstance(payload.get("current_route"), dict) and isinstance(payload["current_route"].get("result"), dict):
+        result = payload["current_route"]["result"]
+
+    recommended = result.get("recommended") if isinstance(result, dict) else None
+    if not isinstance(recommended, dict):
+        recommended = payload.get("recommended") if isinstance(payload.get("recommended"), dict) else {}
+
+    station = recommended.get("station_name") or recommended.get("name") or "Sin recomendación"
+    price = recommended.get("price")
+    price_label = format_price_label(price)
+    address = recommended.get("address") or ""
+    municipality = recommended.get("municipality") or ""
+
+    decision_reason = ""
+    if isinstance(payload.get("decision"), dict):
+        decision_reason = str(payload["decision"].get("reason") or "")
+
+    weather_text = ""
+    weather_summary = payload.get("weather_summary")
+    if isinstance(weather_summary, dict):
+        current_weather = weather_summary.get("current")
+        if isinstance(current_weather, dict):
+            weather_text = str(current_weather.get("result") or "")
+            bullets = current_weather.get("bullets")
+            if isinstance(bullets, list) and bullets:
+                weather_text = f"{weather_text}\n" + "\n".join(str(x) for x in bullets[:3])
+
+    map_payload = payload.get("map") if isinstance(payload.get("map"), dict) else {}
+    click_url = first_map_link(map_payload)
+    if not click_url:
+        links = payload.get("links")
+        if isinstance(links, list):
+            for item in links:
+                if isinstance(item, dict) and item.get("label") == "Mapa visual":
+                    click_url = item.get("url")
+                    break
+
+    title = f"⛽ Gasolina: {price_label} · {station}"
+    lines = [
+        f"Estado: {status}",
+        f"Ruta/zona: {segment}",
+        f"Recomendación: {station}",
+        f"SP95: {price_label}",
+    ]
+    if address or municipality:
+        lines.append(f"Ubicación: {address} · {municipality}".strip(" ·"))
+    if decision_reason:
+        lines.append("")
+        lines.append(decision_reason)
+    if weather_text:
+        lines.append("")
+        lines.append("Tiempo:")
+        lines.append(weather_text)
+    if click_url:
+        lines.append("")
+        lines.append(f"Mapa visual: {click_url}")
+
+    return title[:120], "\n".join(lines), click_url
+
+
+async def publish_ntfy_notification(title: str, message: str, click_url: str | None = None) -> dict[str, Any]:
+    topic = os.getenv("NTFY_TOPIC", "").strip()
+    if not topic:
+        raise HTTPException(status_code=500, detail="Falta configurar NTFY_TOPIC en variables de entorno.")
+
+    server_url = os.getenv("NTFY_SERVER_URL", "https://ntfy.sh").rstrip("/")
+    url = f"{server_url}/{quote_plus(topic)}"
+
+    headers = {
+        "Title": title,
+        "Priority": os.getenv("NTFY_PRIORITY", "default"),
+        "Tags": os.getenv("NTFY_TAGS", "fuel_pump,motorcycle"),
+    }
+    if click_url:
+        headers["Click"] = click_url
+
+    token = os.getenv("NTFY_TOKEN", "").strip()
+    user = os.getenv("NTFY_USER", "").strip()
+    password = os.getenv("NTFY_PASSWORD", "").strip()
+    auth = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif user and password:
+        auth = (user, password)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(url, content=message.encode("utf-8"), headers=headers, auth=auth)
+
+    if response.status_code >= 300:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "ntfy devolvió error al publicar la notificación.",
+                "status_code": response.status_code,
+                "body": response.text[:500],
+            },
+        )
+
+    try:
+        ntfy_response = response.json()
+    except Exception:
+        ntfy_response = {"raw": response.text[:500]}
+
+    return {
+        "status": "sent",
+        "ntfy_status_code": response.status_code,
+        "ntfy_response": ntfy_response,
+    }
+
+
+def verify_notify_secret(secret: str | None) -> None:
+    expected = os.getenv("NOTIFY_SECRET", "").strip()
+    if expected and secret != expected:
+        raise HTTPException(status_code=403, detail="NOTIFY_SECRET incorrecto.")
+
 @app.get("/recommend")
 async def recommend(
     segment: str = Query(default="auto"),
@@ -3466,6 +3598,49 @@ async def recommend(
             }
 
     raise HTTPException(status_code=400, detail="source debe ser precioil, official o auto")
+
+
+
+@app.get("/notify")
+async def notify(
+    segment: str = Query(default="auto"),
+    source: str = Query(default="precioil"),
+    mode: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    origin: str | None = Query(default=None),
+    destination: str | None = Query(default=None),
+    secret: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Ejecuta el informe y manda una notificación push a ntfy."""
+    verify_notify_secret(secret)
+
+    payload = await recommend(
+        segment=segment,
+        source=source,
+        mode=mode,
+        city=city,
+        origin=origin,
+        destination=destination,
+    )
+
+    title, message, click_url = build_ntfy_message(payload)
+    ntfy_result = await publish_ntfy_notification(title, message, click_url)
+
+    return {
+        "status": "ok",
+        "notification": ntfy_result,
+        "title": title,
+        "message_preview": message[:1000],
+        "click_url": click_url,
+        "recommendation": {
+            "segment": payload.get("segment"),
+            "source": payload.get("source"),
+            "recommended": (
+                payload.get("recommended")
+                or (payload.get("current_route") or {}).get("result", {}).get("recommended")
+            ),
+        },
+    }
 
 
 @app.get("/map-image")
