@@ -108,6 +108,7 @@ def shorten_title(value: str, max_len: int = 80) -> str:
         return value
     return value[: max_len - 1].rstrip() + "…"
 
+
 def post_ntfy(
     title: str,
     message: str,
@@ -262,6 +263,13 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"HTTP ERROR {e.code}: {body}", file=sys.stderr)
+        if e.code == 429:
+            print(
+                "⚠️ ntfy ha limitado la notificación. "
+                "El informe se generó, pero no marco el cron como fallido.",
+                file=sys.stderr,
+            )
+            return 0
         return 1
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
