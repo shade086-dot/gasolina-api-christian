@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 import sqlite3
+import tempfile
+import urllib.request
 import unicodedata
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -66,6 +69,17 @@ PRECIOIL_CABANILLAS_AZUQUECA_LON = -3.2500
 PRECIOIL_SEARCH_RADIUS_KM = int(os.environ.get("PRECIOIL_SEARCH_RADIUS_KM", "20"))
 
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://gasolina-api-christian.onrender.com").rstrip("/")
+
+# Panel Moto en mapa visual: lee la misma DB de Mapit desde GitHub.
+MAPIT_STATUS_ENABLED = os.getenv("MAPIT_STATUS_ENABLED", "true").lower() not in {"0", "false", "no"}
+MAPIT_GITHUB_REPO = os.getenv("MAPIT_GITHUB_REPO", "shade086-dot/mapit-pdf-mantenimiento").strip()
+MAPIT_GITHUB_BRANCH = os.getenv("MAPIT_GITHUB_BRANCH", "main").strip() or "main"
+MAPIT_GITHUB_DB_PATH = os.getenv("MAPIT_GITHUB_DB_PATH", "data/moto_maintenance.db").strip()
+MAPIT_GITHUB_TOKEN = os.getenv("MAPIT_GITHUB_TOKEN", os.getenv("GITHUB_TOKEN", "")).strip()
+CHAIN_GREASE_INTERVAL_KM = float(os.getenv("CHAIN_GREASE_INTERVAL_KM", "1000"))
+CHAIN_CLEAN_INTERVAL_KM = float(os.getenv("CHAIN_CLEAN_INTERVAL_KM", "2000"))
+WHEELS_INTERVAL_KM = float(os.getenv("WHEELS_INTERVAL_KM", "4000"))
+REVISION_INTERVAL_KM = float(os.getenv("REVISION_INTERVAL_KM", os.getenv("OIL_INTERVAL_KM", "120000")))
 
 # Coordenadas aproximadas para pintar mapa visual orientativo.
 # Las coordenadas exactas de las gasolineras vienen de Precioil.
@@ -2377,6 +2391,173 @@ def _weather_bullets(weather: dict[str, Any]) -> list[str]:
     return bullets[:5]
 
 
+
+
+def _mapit_github_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if MAPIT_GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {MAPIT_GITHUB_TOKEN}"
+    return headers
+
+
+def _download_mapit_db_bytes() -> bytes | None:
+    if not MAPIT_STATUS_ENABLED or not MAPIT_GITHUB_REPO or not MAPIT_GITHUB_DB_PATH:
+        return None
+    url = (
+        f"https://api.github.com/repos/{MAPIT_GITHUB_REPO}/contents/{MAPIT_GITHUB_DB_PATH}?"
+        + urlencode({"ref": MAPIT_GITHUB_BRANCH})
+    )
+    req = urllib.request.Request(url, headers=_mapit_github_headers())
+    with urllib.request.urlopen(req, timeout=8) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    content = payload.get("content") or ""
+    return base64.b64decode(content)
+
+
+def _mapit_total_trip_km(con: sqlite3.Connection) -> float:
+    return float(con.execute("SELECT COALESCE(SUM(distance_km), 0) FROM trips").fetchone()[0] or 0.0)
+
+
+def _mapit_km_offset(con: sqlite3.Connection) -> float:
+    try:
+        row = con.execute("SELECT value FROM reminder_state WHERE key = 'km_offset'").fetchone()
+        return float(row[0] or 0.0) if row else 0.0
+    except Exception:
+        return 0.0
+
+
+def _mapit_km_since_event(con: sqlite3.Connection, event_type: str) -> float:
+    current = _mapit_total_trip_km(con)
+    row = con.execute(
+        "SELECT trip_total_km FROM maintenance_events WHERE event_type = ? ORDER BY event_at DESC, id DESC LIMIT 1",
+        (event_type,),
+    ).fetchone()
+    if not row:
+        return current
+    return max(0.0, current - float(row[0] or 0.0))
+
+
+def _mapit_last_report_days(con: sqlite3.Connection) -> int | None:
+    row = con.execute("SELECT MAX(imported_at) FROM trips").fetchone()
+    value = row[0] if row else None
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return max(0, (datetime.now(ZoneInfo("UTC")) - dt.astimezone(ZoneInfo("UTC"))).days)
+    except Exception:
+        return None
+
+
+def _mapit_counter(km_done: float, interval: float) -> dict[str, Any]:
+    remaining = max(0.0, interval - km_done)
+    due = remaining <= 0
+    soon = (not due) and remaining <= interval * 0.15
+    return {
+        "km": km_done,
+        "interval": interval,
+        "remaining": remaining,
+        "level": "due" if due else "soon" if soon else "ok",
+        "due": due,
+        "soon": soon,
+    }
+
+
+def build_mapit_status_for_visual() -> dict[str, Any] | None:
+    try:
+        db_bytes = _download_mapit_db_bytes()
+        if not db_bytes:
+            return None
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
+            tmp.write(db_bytes)
+            tmp.flush()
+            con = sqlite3.connect(tmp.name)
+            raw_total = _mapit_total_trip_km(con)
+            offset = _mapit_km_offset(con)
+            status = {
+                "km_totales": raw_total + offset,
+                "km_mapit": raw_total,
+                "km_ajuste": offset,
+                "cadena": _mapit_counter(_mapit_km_since_event(con, "engrase_cadena"), CHAIN_GREASE_INTERVAL_KM),
+                "limpieza": _mapit_counter(_mapit_km_since_event(con, "limpieza_cadena"), CHAIN_CLEAN_INTERVAL_KM),
+                "ruedas": _mapit_counter(_mapit_km_since_event(con, "ruedas"), WHEELS_INTERVAL_KM),
+                "revision": _mapit_counter(_mapit_km_since_event(con, "aceite"), REVISION_INTERVAL_KM),
+                "last_report_days": _mapit_last_report_days(con),
+            }
+            con.close()
+        levels = [status[k]["level"] for k in ("cadena", "limpieza", "ruedas", "revision")]
+        status["alert_level"] = "due" if "due" in levels else "soon" if "soon" in levels else "ok"
+        return status
+    except Exception as exc:
+        print(f"[mapit] No se pudo cargar estado visual: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _moto_bar(counter: dict[str, Any]) -> str:
+    interval = max(1.0, float(counter.get("interval") or 1.0))
+    done = min(float(counter.get("km") or 0.0), interval)
+    filled = max(0, min(10, round((done / interval) * 10)))
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _moto_row(icon: str, label: str, counter: dict[str, Any]) -> str:
+    km = float(counter.get("km") or 0.0)
+    interval = float(counter.get("interval") or 0.0)
+    remaining = float(counter.get("remaining") or 0.0)
+    level = str(counter.get("level") or "ok")
+    state = "TOCA" if level == "due" else f"quedan {remaining:.0f} km"
+    klass = "due" if level == "due" else "soon" if level == "soon" else "ok"
+    return f"""
+      <div class=\"moto-row {klass}\">
+        <div class=\"moto-line\"><b>{html.escape(icon)} {html.escape(label)}</b><span>{html.escape(state)}</span></div>
+        <div class=\"moto-bar\">{html.escape(_moto_bar(counter))}</div>
+        <small>{km:.0f}/{interval:.0f} km</small>
+      </div>
+    """
+
+
+def build_moto_panel_html() -> str:
+    status = build_mapit_status_for_visual()
+    if not status:
+        return """
+        <div class=\"croquis-title\"><h2>Estado moto</h2><span class=\"pill\">Mapit</span></div>
+        <div class=\"moto-card\">
+          <p class=\"note\">No se pudo leer el estado de Mapit ahora mismo.</p>
+        </div>
+        """
+    alert = status.get("alert_level")
+    badge = "Pendiente" if alert == "due" else "Próximo" if alert == "soon" else "OK"
+    badge_class = "due" if alert == "due" else "soon" if alert == "soon" else "ok"
+    offset = float(status.get("km_ajuste") or 0.0)
+    extra = ""
+    if abs(offset) >= 0.001:
+        extra = f"<p class=\"note\">Mapit: {float(status.get('km_mapit') or 0.0):.1f} km · ajuste {offset:+.1f} km</p>"
+    last_report = status.get("last_report_days")
+    if last_report is not None:
+        extra += f"<p class=\"note\">Último informe Mapit: hace {int(last_report)} días</p>"
+    advice = "Mantenimiento al día."
+    if alert == "due":
+        advice = "Hay mantenimiento pendiente. Usa mapit actualizar o mapit revision si ya lo hiciste."
+    elif alert == "soon":
+        advice = "Hay mantenimiento próximo. Revísalo antes de una ruta larga."
+    return f"""
+      <div class=\"croquis-title\"><h2>Estado moto</h2><span class=\"pill moto-pill {badge_class}\">{badge}</span></div>
+      <div class=\"moto-card\">
+        <div class=\"moto-km\">🏍️ {float(status.get('km_totales') or 0.0):.1f} km</div>
+        {_moto_row('⛓️', 'Cadena', status['cadena'])}
+        {_moto_row('🧽', 'Limpieza', status['limpieza'])}
+        {_moto_row('🛞', 'Ruedas', status['ruedas'])}
+        {_moto_row('🔧', 'Revisión', status['revision'])}
+        {extra}
+        <p class=\"moto-advice {badge_class}\">{html.escape(advice)}</p>
+      </div>
+    """
+
 def weather_panel_html_from_reports(
     current_segment: str,
     current_weather: dict[str, Any] | None,
@@ -2632,6 +2813,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
         <div class=\"croquis-title\"><h2>Tiempo para los trayectos</h2><span class=\"pill\">Moto</span></div>
         <p class=\"note\">Previsión no disponible en este momento.</p>
         """
+    moto_panel_html = build_moto_panel_html()
 
     def station_card(row: dict[str, Any], role: str) -> str:
         if not row:
@@ -2675,7 +2857,7 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     .hero {{ background: #fff; border: 1px solid #dbe4ee; border-radius: 18px; padding: 14px 16px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
     .hero h1 {{ margin: 0 0 4px; font-size: 22px; letter-spacing: .2px; }}
     .hero p {{ margin: 0; color: var(--muted); font-size: 14px; }}
-    .layout {{ display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap: 12px; margin-top: 12px; }}
+    .layout {{ display: grid; grid-template-columns: minmax(310px, 1.05fr) minmax(300px, .95fr) minmax(260px, .75fr); gap: 12px; margin-top: 12px; }}
     .croquis {{ background: #fff; border: 1px solid #dbe4ee; border-radius: 18px; padding: 14px; box-shadow: 0 4px 18px rgba(31,41,51,.06); }}
     .croquis-title {{ display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 10px; }}
     .croquis-title h2 {{ margin: 0; font-size: 17px; }}
@@ -2717,6 +2899,24 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     .weather-block ul {{ margin:8px 0 0; padding-left:18px; color:var(--ink); font-size:13px; line-height:1.35; }}
     .weather-block li {{ margin:4px 0; }}
     .weather-result {{ margin:10px 0 0; font-weight:800; }}
+    .moto-card {{ border:1px solid #dbe4ee; border-radius:15px; padding:12px; background:#f9fafb; }}
+    .moto-km {{ font-size:20px; font-weight:900; margin-bottom:10px; }}
+    .moto-row {{ border:1px solid #e5e7eb; background:#fff; border-radius:13px; padding:9px; margin:8px 0; }}
+    .moto-row.ok {{ border-color:#bbf7d0; background:#f0fdf4; }}
+    .moto-row.soon {{ border-color:#fde68a; background:#fffbeb; }}
+    .moto-row.due {{ border-color:#fecaca; background:#fef2f2; }}
+    .moto-line {{ display:flex; justify-content:space-between; gap:8px; align-items:center; }}
+    .moto-line b {{ font-size:13px; }}
+    .moto-line span {{ font-size:12px; font-weight:800; color:#334155; }}
+    .moto-bar {{ margin-top:6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:15px; font-weight:900; letter-spacing:.5px; color:#2563eb; }}
+    .moto-row small {{ color:var(--muted); font-size:11px; }}
+    .moto-advice {{ margin:10px 0 0; font-size:12px; font-weight:800; }}
+    .moto-advice.ok {{ color:#15803d; }}
+    .moto-advice.soon {{ color:#b45309; }}
+    .moto-advice.due {{ color:#b91c1c; }}
+    .moto-pill.ok {{ background:#dcfce7; color:#166534; }}
+    .moto-pill.soon {{ background:#fef3c7; color:#92400e; }}
+    .moto-pill.due {{ background:#fee2e2; color:#991b1b; }}
     @media (max-width: 820px) {{
       .layout {{ grid-template-columns: 1fr; }}
       .route-line {{ grid-template-columns: 1fr; gap: 8px; }}
