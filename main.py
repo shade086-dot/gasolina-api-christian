@@ -79,7 +79,7 @@ MAPIT_GITHUB_TOKEN = os.getenv("MAPIT_GITHUB_TOKEN", os.getenv("GITHUB_TOKEN", "
 CHAIN_GREASE_INTERVAL_KM = float(os.getenv("CHAIN_GREASE_INTERVAL_KM", "1000"))
 CHAIN_CLEAN_INTERVAL_KM = float(os.getenv("CHAIN_CLEAN_INTERVAL_KM", "2000"))
 WHEELS_INTERVAL_KM = float(os.getenv("WHEELS_INTERVAL_KM", "4000"))
-REVISION_INTERVAL_KM = float(os.getenv("REVISION_INTERVAL_KM", os.getenv("OIL_INTERVAL_KM", "120000")))
+REVISION_INTERVAL_KM = float(os.getenv("REVISION_INTERVAL_KM", os.getenv("OIL_INTERVAL_KM", "12000")))
 
 # Coordenadas aproximadas para pintar mapa visual orientativo.
 # Las coordenadas exactas de las gasolineras vienen de Precioil.
