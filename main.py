@@ -4060,11 +4060,28 @@ async def map_view(
 
     map_payload = build_map_payload(segment, result)
     calendar_route_plan = await resolve_current_and_next_segments_from_calendar() if env_bool("PUBLIC_CALENDAR_ENABLED", True) else {}
-    next_segment = calendar_route_plan.get("next_segment") if isinstance(calendar_route_plan, dict) else None
+
+    # Panel de tiempo: cuando el mapa se abre para un tramo concreto (p. ej. cabanillas_return)
+    # y el calendario ya sabe que el siguiente hito real es "ida a Forus", usamos ese hito
+    # como siguiente trayecto aunque calendar_route_plan.next_segment sea la vuelta de Forus.
+    # Esto evita mostrar "Regreso Forus → Anchuelo" antes de haber ido a Forus.
+    next_segment = None
+    if segment not in DYNAMIC_ROUTE_ENDPOINTS and isinstance(calendar_route_plan, dict):
+        calendar_current = calendar_route_plan.get("current_segment")
+        calendar_next = calendar_route_plan.get("next_segment")
+        if route_known(calendar_current) and calendar_current != segment:
+            next_segment = calendar_current
+            calendar_route_plan = dict(calendar_route_plan)
+            if calendar_route_plan.get("current_occurrence"):
+                calendar_route_plan["next_occurrence"] = calendar_route_plan.get("current_occurrence")
+        elif route_known(calendar_next) and calendar_next != segment:
+            next_segment = calendar_next
+
     if segment in DYNAMIC_ROUTE_ENDPOINTS:
         next_segment = None
     elif not route_known(next_segment) or next_segment == segment:
         next_segment = next_segment_for(segment)
+
     weather_panel = await build_weather_panel_html(segment, next_segment, calendar_route_plan)
     return HTMLResponse(render_visual_map_html(segment, result, map_payload, weather_panel))
 
