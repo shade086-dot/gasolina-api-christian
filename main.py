@@ -2440,18 +2440,52 @@ def _mapit_km_since_event(con: sqlite3.Connection, event_type: str) -> float:
     return max(0.0, current - float(row[0] or 0.0))
 
 
-def _mapit_last_report_days(con: sqlite3.Connection) -> int | None:
-    row = con.execute("SELECT MAX(imported_at) FROM trips").fetchone()
+def _mapit_setting_float(con: sqlite3.Connection, key: str) -> float | None:
+    try:
+        row = con.execute("SELECT value FROM reminder_state WHERE key = ?", (key,)).fetchone()
+        if not row or row[0] in (None, ""):
+            return None
+        return float(row[0])
+    except Exception:
+        return None
+
+
+def _mapit_data_until(con: sqlite3.Connection) -> str | None:
+    row = con.execute("SELECT MAX(end_at) FROM trips").fetchone()
     value = row[0] if row else None
     if not value:
         return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return max(0, (datetime.now(ZoneInfo("UTC")) - dt.astimezone(ZoneInfo("UTC"))).days)
-    except Exception:
-        return None
+    text = str(value).strip()
+    return text[:10] if len(text) >= 10 else text
+
+
+def _mapit_revision_counter(con: sqlite3.Connection, current_odometer_km: float) -> dict[str, Any]:
+    last = _mapit_setting_float(con, "last_revision_odometer_km")
+    target = _mapit_setting_float(con, "next_revision_odometer_km")
+    interval = max(1.0, REVISION_INTERVAL_KM)
+    if target is None:
+        target = max(interval, math.ceil(max(0.0, current_odometer_km) / interval) * interval)
+    if target <= current_odometer_km:
+        target = max(interval, math.ceil((current_odometer_km + 1) / interval) * interval)
+    if last is None:
+        last = max(0.0, target - interval)
+    span = max(1.0, target - last)
+    done = max(0.0, current_odometer_km - last)
+    remaining = max(0.0, target - current_odometer_km)
+    due = remaining <= 0
+    soon = (not due) and remaining <= span * 0.15
+    return {
+        "km": done,
+        "interval": span,
+        "remaining": remaining,
+        "level": "due" if due else "soon" if soon else "ok",
+        "due": due,
+        "soon": soon,
+        "target_odometer_km": target,
+        "last_odometer_km": last,
+        "current_odometer_km": current_odometer_km,
+        "mode": "odometer_absolute",
+    }
 
 
 def _mapit_counter(km_done: float, interval: float) -> dict[str, Any]:
@@ -2479,15 +2513,16 @@ def build_mapit_status_for_visual() -> dict[str, Any] | None:
             con = sqlite3.connect(tmp.name)
             raw_total = _mapit_total_trip_km(con)
             offset = _mapit_km_offset(con)
+            odometer = raw_total + offset
             status = {
-                "km_totales": raw_total + offset,
+                "km_totales": odometer,
                 "km_mapit": raw_total,
                 "km_ajuste": offset,
                 "cadena": _mapit_counter(_mapit_km_since_event(con, "engrase_cadena"), CHAIN_GREASE_INTERVAL_KM),
                 "limpieza": _mapit_counter(_mapit_km_since_event(con, "limpieza_cadena"), CHAIN_CLEAN_INTERVAL_KM),
                 "ruedas": _mapit_counter(_mapit_km_since_event(con, "ruedas"), WHEELS_INTERVAL_KM),
-                "revision": _mapit_counter(_mapit_km_since_event(con, "aceite"), REVISION_INTERVAL_KM),
-                "last_report_days": _mapit_last_report_days(con),
+                "revision": _mapit_revision_counter(con, odometer),
+                "mapit_data_until": _mapit_data_until(con),
             }
             con.close()
         levels = [status[k]["level"] for k in ("cadena", "limpieza", "ruedas", "revision")]
@@ -2522,14 +2557,21 @@ def _moto_row(icon: str, label: str, counter: dict[str, Any]) -> str:
     else:
         state = f"{remaining:.0f} km"
         remaining_text = "restantes"
+    if counter.get("target_odometer_km") is not None:
+        target = float(counter.get("target_odometer_km") or 0.0)
+        last = float(counter.get("last_odometer_km") or 0.0)
+        meta_left = f"Próx. {target:.0f} km"
+        meta_right = f"desde {last:.0f} km" if last else "por odómetro"
+    else:
+        meta_left = f"{km:.0f}/{interval:.0f} km"
+        meta_right = remaining_text
     return f"""
       <div class=\"moto-row {klass}\">
         <div class=\"moto-line\"><b>{html.escape(icon)} {html.escape(label)}</b><span>{html.escape(state)}</span></div>
         {_moto_bar(counter)}
-        <div class=\"moto-meta\"><span>{km:.0f}/{interval:.0f} km</span><span>{html.escape(remaining_text)}</span></div>
+        <div class=\"moto-meta\"><span>{html.escape(meta_left)}</span><span>{html.escape(meta_right)}</span></div>
       </div>
     """
-
 
 def _moto_due_labels(status: dict[str, Any]) -> list[str]:
     items = []
@@ -2575,9 +2617,9 @@ def build_moto_panel_html() -> str:
     extra = ""
     if abs(offset) >= 0.001:
         extra = f"<p class=\"note\">Mapit: {float(status.get('km_mapit') or 0.0):.1f} km · ajuste {offset:+.1f} km</p>"
-    last_report = status.get("last_report_days")
-    if last_report is not None:
-        extra += f"<p class=\"note\">Último informe Mapit: hace {int(last_report)} días</p>"
+    data_until = status.get("mapit_data_until")
+    if data_until:
+        extra += f"<p class=\"note\">📄 Datos Mapit hasta: {html.escape(str(data_until))}</p>"
 
     advice = "🟢 Todo al día. Sin mantenimiento urgente."
     if alert == "due":
