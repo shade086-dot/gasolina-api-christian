@@ -2613,10 +2613,7 @@ def build_moto_panel_html() -> str:
     alert = status.get("alert_level")
     badge = "Pendiente" if alert == "due" else "Próximo" if alert == "soon" else "OK"
     badge_class = "due" if alert == "due" else "soon" if alert == "soon" else "ok"
-    offset = float(status.get("km_ajuste") or 0.0)
-    extra = ""
-    if abs(offset) >= 0.001:
-        extra = f"<p class=\"note\">Mapit: {float(status.get('km_mapit') or 0.0):.1f} km · ajuste {offset:+.1f} km</p>"
+    extra = f"<p class=\"note\">📄 Mapit: {float(status.get('km_mapit') or 0.0):.1f} km</p>"
     data_until = status.get("mapit_data_until")
     if data_until:
         extra += f"<p class=\"note\">📄 Datos Mapit hasta: {html.escape(str(data_until))}</p>"
