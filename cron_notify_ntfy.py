@@ -36,7 +36,7 @@ MAPIT_COUNTER_FILE = os.getenv("MAPIT_COUNTER_FILE", "/tmp/gasolina_mapit_counte
 
 CHAIN_GREASE_INTERVAL_KM = float(os.getenv("CHAIN_GREASE_INTERVAL_KM", "1000"))
 CHAIN_CLEAN_INTERVAL_KM = float(os.getenv("CHAIN_CLEAN_INTERVAL_KM", "3000"))
-OIL_INTERVAL_KM = float(os.getenv("OIL_INTERVAL_KM", "12000"))
+REVISION_INTERVAL_KM = float(os.getenv("REVISION_INTERVAL_KM", os.getenv("OIL_INTERVAL_KM", "12000")))
 
 
 def get_json(url: str, timeout: int = 300) -> dict:
@@ -252,6 +252,14 @@ def km_since_event(con: sqlite3.Connection, event_type: str) -> float:
     return max(0.0, current - float(row[0] or 0.0))
 
 
+def mapit_km_offset(con: sqlite3.Connection) -> float:
+    try:
+        row = con.execute("SELECT value FROM reminder_state WHERE key = 'km_offset'").fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+    except Exception:
+        return 0.0
+
+
 def last_report_days(con: sqlite3.Connection) -> int | None:
     row = con.execute("SELECT MAX(imported_at) FROM trips").fetchone()
     value = row[0] if row else None
@@ -283,24 +291,28 @@ def build_mapit_status() -> dict | None:
             tmp.write(db_bytes)
             tmp.flush()
             con = sqlite3.connect(tmp.name)
-            total = total_trip_km(con)
+            raw_total = total_trip_km(con)
+            offset = mapit_km_offset(con)
+            total = raw_total + offset
             trips = count_trips(con)
             chain = counter_status(km_since_event(con, "engrase_cadena"), CHAIN_GREASE_INTERVAL_KM)
             clean = counter_status(km_since_event(con, "limpieza_cadena"), CHAIN_CLEAN_INTERVAL_KM)
-            oil = counter_status(km_since_event(con, "aceite"), OIL_INTERVAL_KM)
+            revision = counter_status(km_since_event(con, "aceite"), REVISION_INTERVAL_KM)
             report_days = last_report_days(con)
             con.close()
 
-        levels = [chain["level"], clean["level"], oil["level"]]
+        levels = [chain["level"], clean["level"], revision["level"]]
         alert_level = "due" if "due" in levels else "soon" if "soon" in levels else "ok"
         return {
             "ok": True,
             "km_totales": total,
+            "km_mapit": raw_total,
+            "km_ajuste": offset,
             "trayectos_guardados": trips,
             "alert_level": alert_level,
             "cadena": chain,
             "limpieza": clean,
-            "aceite": oil,
+            "revision": revision,
             "last_report_days": report_days,
         }
     except Exception as exc:
@@ -317,21 +329,26 @@ def build_mapit_block(status: dict | None) -> str:
 
     cadena = status["cadena"]
     limpieza = status["limpieza"]
-    aceite = status["aceite"]
+    revision = status["revision"]
     report_days = status.get("last_report_days")
+    offset = float(status.get("km_ajuste") or 0.0)
 
     lines = [
         "🏍️ Moto",
-        f"Km Mapit: {status.get('km_totales', 0):.1f} km",
+        f"Km reales estimados: {status.get('km_totales', 0):.1f} km",
+    ]
+    if abs(offset) >= 0.1:
+        lines.append(f"Km Mapit: {status.get('km_mapit', 0):.1f} km · ajuste {offset:+.1f} km")
+    lines.extend([
         f"Cadena: {cadena['km']:.0f}/{cadena['interval']:.0f} km — quedan {cadena['remaining']:.0f} km",
         f"Limpieza: {limpieza['km']:.0f}/{limpieza['interval']:.0f} km — quedan {limpieza['remaining']:.0f} km",
-        f"Aceite: {aceite['km']:.0f}/{aceite['interval']:.0f} km — quedan {aceite['remaining']:.0f} km",
-    ]
+        f"Revisión: {revision['km']:.0f}/{revision['interval']:.0f} km — quedan {revision['remaining']:.0f} km",
+    ])
     if report_days is not None:
         lines.append(f"Último informe Mapit: hace {report_days} días")
 
     if level == "due":
-        lines.append("🚨 Mantenimiento pendiente. Si ya lo hiciste: mapit engrase / mapit limpieza / mapit aceite")
+        lines.append("🚨 Mantenimiento pendiente. Si ya lo hiciste: mapit engrase / mapit limpieza / mapit revision")
     elif level == "soon":
         lines.append("🔶 Mantenimiento próximo. Revísalo antes de una ruta larga.")
     else:
