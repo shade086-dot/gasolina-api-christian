@@ -1695,6 +1695,10 @@ def render_map_svg(segment: str, result: dict[str, Any], map_payload: dict[str, 
   <text x="{panel_x+46}" y="{panel_y+442}" class="small">{_svg_escape(alt_text or "Sin alternativa cercana")}</text>
   <text x="{panel_x+28}" y="{panel_y+520}" class="small">Ruta dibujada de forma orientativa por carretera.</text>
   <text x="{panel_x+28}" y="{panel_y+548}" class="small">Para navegación real: Google Maps / Apple Maps.</text>
+  <rect x="{panel_x+20}" y="{panel_y+330}" width="330" height="165" rx="18" fill="#f8fafc" stroke="#dbe4ee"/>
+  <text x="{panel_x+40}" y="{panel_y+360}" class="card-title">🏍️ Moto</text>
+  <text x="{panel_x+40}" y="{panel_y+390}" class="small">Aquí aparecerá el estado de cadena, limpieza, ruedas y revisión.</text>
+  <text x="{panel_x+40}" y="{panel_y+420}" class="small">Sincronizado con Mapit.</text>
 </svg>"""
 
 
