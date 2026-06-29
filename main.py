@@ -2498,11 +2498,16 @@ def build_mapit_status_for_visual() -> dict[str, Any] | None:
         return None
 
 
-def _moto_bar(counter: dict[str, Any]) -> str:
+def _moto_percent(counter: dict[str, Any]) -> int:
     interval = max(1.0, float(counter.get("interval") or 1.0))
-    done = min(float(counter.get("km") or 0.0), interval)
-    filled = max(0, min(10, round((done / interval) * 10)))
-    return "█" * filled + "░" * (10 - filled)
+    km = max(0.0, float(counter.get("km") or 0.0))
+    return max(0, min(100, round((km / interval) * 100)))
+
+
+def _moto_bar(counter: dict[str, Any]) -> str:
+    pct = _moto_percent(counter)
+    level = str(counter.get("level") or "ok")
+    return f'<div class="moto-progress"><div class="moto-progress-fill {html.escape(level)}" style="width:{pct}%"></div></div>'
 
 
 def _moto_row(icon: str, label: str, counter: dict[str, Any]) -> str:
@@ -2510,22 +2515,55 @@ def _moto_row(icon: str, label: str, counter: dict[str, Any]) -> str:
     interval = float(counter.get("interval") or 0.0)
     remaining = float(counter.get("remaining") or 0.0)
     level = str(counter.get("level") or "ok")
-    state = "TOCA" if level == "due" else f"quedan {remaining:.0f} km"
     klass = "due" if level == "due" else "soon" if level == "soon" else "ok"
+    if level == "due":
+        state = "TOCA"
+        remaining_text = "pendiente"
+    else:
+        state = f"{remaining:.0f} km"
+        remaining_text = "restantes"
     return f"""
       <div class=\"moto-row {klass}\">
         <div class=\"moto-line\"><b>{html.escape(icon)} {html.escape(label)}</b><span>{html.escape(state)}</span></div>
-        <div class=\"moto-bar\">{html.escape(_moto_bar(counter))}</div>
-        <small>{km:.0f}/{interval:.0f} km</small>
+        {_moto_bar(counter)}
+        <div class=\"moto-meta\"><span>{km:.0f}/{interval:.0f} km</span><span>{html.escape(remaining_text)}</span></div>
       </div>
     """
+
+
+def _moto_due_labels(status: dict[str, Any]) -> list[str]:
+    items = []
+    mapping = [
+        ("cadena", "engrasar cadena"),
+        ("limpieza", "limpiar transmisión"),
+        ("ruedas", "revisar ruedas"),
+        ("revision", "planificar revisión"),
+    ]
+    for key, label in mapping:
+        if (status.get(key) or {}).get("level") == "due":
+            items.append(label)
+    return items
+
+
+def _moto_soon_labels(status: dict[str, Any]) -> list[str]:
+    items = []
+    mapping = [
+        ("cadena", "cadena"),
+        ("limpieza", "limpieza"),
+        ("ruedas", "ruedas"),
+        ("revision", "revisión"),
+    ]
+    for key, label in mapping:
+        if (status.get(key) or {}).get("level") == "soon":
+            items.append(label)
+    return items
 
 
 def build_moto_panel_html() -> str:
     status = build_mapit_status_for_visual()
     if not status:
         return """
-        <div class=\"croquis-title\"><h2>Estado moto</h2><span class=\"pill\">Mapit</span></div>
+        <div class=\"croquis-title\"><div><h2>🏍️ Mantenimiento</h2><p class=\"panel-subtitle\">Honda CB750 Hornet</p></div><span class=\"pill\">Mapit</span></div>
         <div class=\"moto-card\">
           <p class=\"note\">No se pudo leer el estado de Mapit ahora mismo.</p>
         </div>
@@ -2540,17 +2578,22 @@ def build_moto_panel_html() -> str:
     last_report = status.get("last_report_days")
     if last_report is not None:
         extra += f"<p class=\"note\">Último informe Mapit: hace {int(last_report)} días</p>"
-    advice = "Mantenimiento al día."
+
+    advice = "🟢 Todo al día. Sin mantenimiento urgente."
     if alert == "due":
-        advice = "Hay mantenimiento pendiente. Usa mapit actualizar o mapit revision si ya lo hiciste."
+        due = _moto_due_labels(status)
+        action = ", ".join(due[:3]) if due else "revisar mantenimiento"
+        advice = f"🔴 Próxima acción: {action}. Usa mapit actualizar o mapit revision si ya lo hiciste."
     elif alert == "soon":
-        advice = "Hay mantenimiento próximo. Revísalo antes de una ruta larga."
+        soon = _moto_soon_labels(status)
+        action = ", ".join(soon[:3]) if soon else "mantenimiento próximo"
+        advice = f"🟡 Próximo: {action}. Revísalo antes de una ruta larga."
     return f"""
-      <div class=\"croquis-title\"><h2>Estado moto</h2><span class=\"pill moto-pill {badge_class}\">{badge}</span></div>
+      <div class=\"croquis-title\"><div><h2>🏍️ Mantenimiento</h2><p class=\"panel-subtitle\">Honda CB750 Hornet</p></div><span class=\"pill moto-pill {badge_class}\">{badge}</span></div>
       <div class=\"moto-card\">
-        <div class=\"moto-km\">🏍️ {float(status.get('km_totales') or 0.0):.1f} km</div>
+        <div class=\"moto-km\"><span>Km reales</span><strong>{float(status.get('km_totales') or 0.0):.1f}</strong></div>
         {_moto_row('⛓️', 'Cadena', status['cadena'])}
-        {_moto_row('🧽', 'Limpieza', status['limpieza'])}
+        {_moto_row('🧼', 'Limpieza', status['limpieza'])}
         {_moto_row('🛞', 'Ruedas', status['ruedas'])}
         {_moto_row('🔧', 'Revisión', status['revision'])}
         {extra}
@@ -2899,21 +2942,28 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
     .weather-block ul {{ margin:8px 0 0; padding-left:18px; color:var(--ink); font-size:13px; line-height:1.35; }}
     .weather-block li {{ margin:4px 0; }}
     .weather-result {{ margin:10px 0 0; font-weight:800; }}
-    .moto-card {{ border:1px solid #dbe4ee; border-radius:15px; padding:12px; background:#f9fafb; }}
-    .moto-km {{ font-size:20px; font-weight:900; margin-bottom:10px; }}
-    .moto-row {{ border:1px solid #e5e7eb; background:#fff; border-radius:13px; padding:9px; margin:8px 0; }}
+    .panel-subtitle {{ margin:2px 0 0; color:var(--muted); font-size:12px; font-weight:700; }}
+    .moto-card {{ border:1px solid #dbe4ee; border-radius:17px; padding:13px; background:linear-gradient(180deg,#ffffff,#f8fafc); }}
+    .moto-km {{ display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-bottom:11px; }}
+    .moto-km span {{ color:var(--muted); font-size:12px; font-weight:800; }}
+    .moto-km strong {{ font-size:24px; font-weight:950; letter-spacing:-.5px; }}
+    .moto-row {{ border:1px solid #e5e7eb; background:#fff; border-radius:14px; padding:10px; margin:9px 0; }}
     .moto-row.ok {{ border-color:#bbf7d0; background:#f0fdf4; }}
     .moto-row.soon {{ border-color:#fde68a; background:#fffbeb; }}
     .moto-row.due {{ border-color:#fecaca; background:#fef2f2; }}
     .moto-line {{ display:flex; justify-content:space-between; gap:8px; align-items:center; }}
     .moto-line b {{ font-size:13px; }}
-    .moto-line span {{ font-size:12px; font-weight:800; color:#334155; }}
-    .moto-bar {{ margin-top:6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:15px; font-weight:900; letter-spacing:.5px; color:#2563eb; }}
-    .moto-row small {{ color:var(--muted); font-size:11px; }}
-    .moto-advice {{ margin:10px 0 0; font-size:12px; font-weight:800; }}
-    .moto-advice.ok {{ color:#15803d; }}
-    .moto-advice.soon {{ color:#b45309; }}
-    .moto-advice.due {{ color:#b91c1c; }}
+    .moto-line span {{ font-size:12px; font-weight:900; color:#334155; }}
+    .moto-progress {{ height:9px; border-radius:999px; overflow:hidden; background:#e5e7eb; margin-top:8px; box-shadow:inset 0 0 0 1px rgba(15,23,42,.05); }}
+    .moto-progress-fill {{ height:100%; border-radius:999px; }}
+    .moto-progress-fill.ok {{ background:#16a34a; }}
+    .moto-progress-fill.soon {{ background:#f59e0b; }}
+    .moto-progress-fill.due {{ background:#dc2626; }}
+    .moto-meta {{ display:flex; justify-content:space-between; gap:8px; margin-top:5px; color:var(--muted); font-size:11px; font-weight:700; }}
+    .moto-advice {{ margin:12px 0 0; padding:10px; border-radius:12px; font-size:12px; line-height:1.25; font-weight:900; }}
+    .moto-advice.ok {{ color:#166534; background:#dcfce7; }}
+    .moto-advice.soon {{ color:#92400e; background:#fef3c7; }}
+    .moto-advice.due {{ color:#991b1b; background:#fee2e2; }}
     .moto-pill.ok {{ background:#dcfce7; color:#166534; }}
     .moto-pill.soon {{ background:#fef3c7; color:#92400e; }}
     .moto-pill.due {{ background:#fee2e2; color:#991b1b; }}
