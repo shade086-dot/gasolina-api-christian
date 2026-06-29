@@ -2953,6 +2953,10 @@ def render_visual_map_html(segment: str, result: dict[str, Any], map_payload: di
       <div class=\"croquis\">
         {weather_panel_html}
       </div>
+
+      <div class=\"croquis moto-panel\">
+        {moto_panel_html}
+      </div>
     </section>
 
     <section class=\"map-wrap\">
