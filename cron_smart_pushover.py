@@ -21,6 +21,12 @@ LOOKAHEAD_HOURS = int(os.getenv("SMART_LOOKAHEAD_HOURS", "36"))
 # Si solo buscamos desde ahora-18min, el evento de oficina de la mañana desaparece
 # y nunca se detecta su hora de fin. Por defecto miramos 14h hacia atrás.
 LOOKBACK_HOURS = int(os.getenv("SMART_LOOKBACK_HOURS", "14"))
+
+# Doble aviso para salidas desde casa: por defecto 45 y 30 min antes del evento.
+# Se puede cambiar en Render con SMART_OUT_NOTICE_MINS="60,30" o SMART_OUT_NOTICE_MINS="45,30".
+OUT_NOTICE_MINS_RAW = os.getenv("SMART_OUT_NOTICE_MINS", "45,30")
+RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "")
+
 FORUS_OUT_NOTICE_MIN = int(os.getenv("SMART_FORUS_OUT_NOTICE_MIN", "75"))
 FORUS_RETURN_NOTICE_MIN = int(os.getenv("SMART_FORUS_RETURN_NOTICE_MIN", "0"))
 FORUS_BLOCK_GAP_MIN = int(os.getenv("SMART_FORUS_BLOCK_GAP_MIN", "45"))
@@ -34,6 +40,31 @@ DEBUG = os.getenv("SMART_DEBUG", "false").lower() in {"1", "true", "yes"}
 
 def _now() -> datetime:
     return datetime.now(api.local_tz())
+
+
+def _parse_notice_offsets(raw: str, fallback: int) -> list[int]:
+    values: list[int] = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value >= 0 and value not in values:
+            values.append(value)
+    if not values:
+        values = [fallback]
+    return values
+
+
+def _out_notice_offsets(fallback: int) -> list[int]:
+    return _parse_notice_offsets(OUT_NOTICE_MINS_RAW, fallback)
+
+
+def _return_notice_offsets(fallback: int) -> list[int]:
+    return _parse_notice_offsets(RETURN_NOTICE_MINS_RAW, fallback)
 
 
 def _load_state() -> dict[str, str]:
@@ -152,11 +183,35 @@ def _travel_params_from_event(event: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def _append_timed_actions(
+    actions: list[dict[str, Any]],
+    *,
+    base_key: str,
+    kind: str,
+    segment: str,
+    event_time: datetime,
+    event: dict[str, Any],
+    offsets: list[int],
+    now: datetime,
+) -> None:
+    for offset in offsets:
+        target = event_time - timedelta(minutes=offset)
+        if _inside_window(now, target):
+            notice_label = f"{offset} min" if offset else "ahora"
+            actions.append({
+                "key": f"{base_key}:notice-{offset}",
+                "kind": f"{kind} · aviso {notice_label}",
+                "segment": segment,
+                "target": target,
+                "event": api.serialize_calendar_event(event),
+            })
+
+
 def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     _forus_keywords, office_keywords = _keywords()
 
-    # Forus: ida antes de la primera clase del bloque; vuelta justo al terminar el último evento seguido.
+    # Forus: dos avisos de ida antes de la primera clase del bloque; vuelta justo al terminar el último evento seguido.
     for group in _group_forus_events(events):
         starts = [_event_dt(e, "start") for e in group if _event_dt(e, "start")]
         ends = [(_event_dt(e, "end") or _event_dt(e, "start")) for e in group if _event_dt(e, "start")]
@@ -167,27 +222,29 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
         first_event = group[0]
         last_event = group[-1]
 
-        out_target = first_start - timedelta(minutes=FORUS_OUT_NOTICE_MIN)
-        if _inside_window(now, out_target):
-            actions.append({
-                "key": f"forus_out:{first_start.isoformat()}:{_event_id(first_event)}",
-                "kind": "Forus ida",
-                "segment": "forus_out",
-                "target": out_target,
-                "event": api.serialize_calendar_event(first_event),
-            })
+        _append_timed_actions(
+            actions,
+            base_key=f"forus_out:{first_start.isoformat()}:{_event_id(first_event)}",
+            kind="Forus ida",
+            segment="forus_out",
+            event_time=first_start,
+            event=first_event,
+            offsets=_out_notice_offsets(FORUS_OUT_NOTICE_MIN),
+            now=now,
+        )
 
-        return_target = last_end - timedelta(minutes=FORUS_RETURN_NOTICE_MIN)
-        if _inside_window(now, return_target):
-            actions.append({
-                "key": f"forus_return:{last_end.isoformat()}:{_event_id(last_event)}",
-                "kind": "Forus vuelta",
-                "segment": "forus_return",
-                "target": return_target,
-                "event": api.serialize_calendar_event(last_event),
-            })
+        _append_timed_actions(
+            actions,
+            base_key=f"forus_return:{last_end.isoformat()}:{_event_id(last_event)}",
+            kind="Forus vuelta",
+            segment="forus_return",
+            event_time=last_end,
+            event=last_event,
+            offsets=_return_notice_offsets(FORUS_RETURN_NOTICE_MIN),
+            now=now,
+        )
 
-    # Oficina: informe completo antes de empezar y al terminar el evento de oficina.
+    # Oficina: dos avisos de ida antes de empezar y vuelta al terminar el evento de oficina.
     for event in events:
         if not api.event_matches(event, office_keywords):
             continue
@@ -195,25 +252,27 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
         end = _event_dt(event, "end") or start
         if not start:
             continue
-        out_target = start - timedelta(minutes=OFFICE_OUT_NOTICE_MIN)
-        if _inside_window(now, out_target):
-            actions.append({
-                "key": f"office_out:{start.isoformat()}:{_event_id(event)}",
-                "kind": "Oficina ida",
-                "segment": "cabanillas_out",
-                "target": out_target,
-                "event": api.serialize_calendar_event(event),
-            })
+        _append_timed_actions(
+            actions,
+            base_key=f"office_out:{start.isoformat()}:{_event_id(event)}",
+            kind="Oficina ida",
+            segment="cabanillas_out",
+            event_time=start,
+            event=event,
+            offsets=_out_notice_offsets(OFFICE_OUT_NOTICE_MIN),
+            now=now,
+        )
         if end and end > start:
-            return_target = end - timedelta(minutes=OFFICE_RETURN_NOTICE_MIN)
-            if _inside_window(now, return_target):
-                actions.append({
-                    "key": f"office_return:{end.isoformat()}:{_event_id(event)}",
-                    "kind": "Oficina vuelta",
-                    "segment": "cabanillas_return",
-                    "target": return_target,
-                    "event": api.serialize_calendar_event(event),
-                })
+            _append_timed_actions(
+                actions,
+                base_key=f"office_return:{end.isoformat()}:{_event_id(event)}",
+                kind="Oficina vuelta",
+                segment="cabanillas_return",
+                event_time=end,
+                event=event,
+                offsets=_return_notice_offsets(OFFICE_RETURN_NOTICE_MIN),
+                now=now,
+            )
 
     # Viajes/vacaciones: sin lugar no hace nada; con ciudad => mode=city; origen→destino => mode=route.
     for event in events:
@@ -257,7 +316,7 @@ def _send_action(action: dict[str, Any]) -> None:
         return
     title, message, map_url = notify.build_message(data)
     title = f"🤖 {action.get('kind')} · {title}"
-    message = f"Calendario inteligente V11: {action.get('kind')}\n\n{message}"
+    message = f"Calendario inteligente V12: {action.get('kind')}\n\n{message}"
     if DRY_RUN:
         print(f"[smart] DRY RUN: {title}\n{message[:800]}")
         return
@@ -275,7 +334,11 @@ async def amain() -> int:
 
     pending = [a for a in actions if a["key"] not in state]
     if not pending:
-        print(f"[smart] Sin avisos. Eventos revisados: {len(events)}. Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. Tolerancia: {TOLERANCE_MIN}min.")
+        print(
+            f"[smart] Sin avisos. Eventos revisados: {len(events)}. "
+            f"Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. "
+            f"Tolerancia: {TOLERANCE_MIN}min. Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}."
+        )
         _save_state(state)
         return 0
 
