@@ -6,8 +6,8 @@ Usar en Render como Start Command:
 from __future__ import annotations
 
 import main
-import sitecustomize as rutas_ext
+import gpx_routes_ext
 
-rutas_ext._install_routes(main)
+gpx_routes_ext.install_routes(main)
 
 app = main.app
