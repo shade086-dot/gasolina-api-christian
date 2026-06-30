@@ -1,0 +1,200 @@
+[
+  {
+    "name": "MapitRoute-1vPM2.gpx",
+    "distance_km": 174.6,
+    "bbox": [40.475862, -3.401872, 41.010675, -3.029448],
+    "start": [40.47609, -3.39369],
+    "end": [40.477157, -3.391787],
+    "points": 773,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1vZ3Z.gpx",
+    "distance_km": 545.0,
+    "bbox": [40.451338, -3.761162, 41.93073, -3.267237],
+    "start": [40.465355, -3.267237],
+    "end": [41.930528, -3.760078],
+    "points": 609,
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+  },
+  {
+    "name": "MapitRoute-1vZ5z.gpx",
+    "distance_km": 570.3,
+    "bbox": [41.92992, -3.778083, 43.37906, -2.868878],
+    "start": [41.930473, -3.759965],
+    "end": [43.37768, -3.21994],
+    "points": 868,
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+  },
+  {
+    "name": "MapitRoute-1vZ9w.gpx",
+    "distance_km": 90.1,
+    "bbox": [43.289475, -3.326948, 43.4042, -3.003847],
+    "start": [43.377832, -3.219677],
+    "end": [43.293435, -3.003913],
+    "points": 250,
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+  },
+  {
+    "name": "MapitRoute-1vZDy.gpx",
+    "distance_km": 66.7,
+    "bbox": [43.291538, -3.22125, 43.379063, -3.000035],
+    "start": [43.293582, -3.00393],
+    "end": [43.377653, -3.220262],
+    "points": 144,
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+  },
+  {
+    "name": "MapitRoute-1vZp8.gpx",
+    "distance_km": 1118.6,
+    "bbox": [40.450942, -3.778303, 43.37798, -2.636547],
+    "start": [43.377653, -3.219973],
+    "end": [40.465455, -3.267347],
+    "points": 1552,
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+  },
+  {
+    "name": "MapitRoute-1vhTL.gpx",
+    "distance_km": 133.0,
+    "bbox": [40.398437, -3.44554, 40.575175, -3.154353],
+    "start": [40.46546, -3.26731],
+    "end": [40.495357, -3.358787],
+    "points": 538,
+    "group": "Local Anchuelo / Alcalá"
+  },
+  {
+    "name": "MapitRoute-1vu9H.gpx",
+    "distance_km": 186.9,
+    "bbox": [40.450057, -3.368317, 40.551082, -2.743757],
+    "start": [40.492758, -3.36184],
+    "end": [40.50636, -2.743885],
+    "points": 510,
+    "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
+    "name": "MapitRoute-1vuBS.gpx",
+    "distance_km": 27.2,
+    "bbox": [40.506218, -2.756057, 40.574388, -2.736757],
+    "start": [40.506218, -2.74402],
+    "end": [40.573968, -2.752302],
+    "points": 125,
+    "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
+    "name": "MapitRoute-1vuCz.gpx",
+    "distance_km": 60.9,
+    "bbox": [40.481192, -2.79763, 40.63496, -2.660697],
+    "start": [40.573855, -2.752382],
+    "end": [40.483413, -2.733488],
+    "points": 193,
+    "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
+    "name": "MapitRoute-1vuEH.gpx",
+    "distance_km": 171.3,
+    "bbox": [40.465477, -3.291652, 40.627792, -2.733335],
+    "start": [40.48337, -2.73346],
+    "end": [40.465477, -3.267375],
+    "points": 311,
+    "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
+    "name": "MapitRoute-1w9N6.gpx",
+    "distance_km": 204.0,
+    "bbox": [40.465557, -3.289257, 41.021122, -3.16125],
+    "start": [40.465557, -3.267467],
+    "end": [41.021122, -3.236373],
+    "points": 315,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1w9OI.gpx",
+    "distance_km": 17.2,
+    "bbox": [41.021122, -3.236373, 41.061705, -3.204567],
+    "start": [41.021122, -3.236373],
+    "end": [41.061705, -3.223355],
+    "points": 57,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1w9OS.gpx",
+    "distance_km": 88.3,
+    "bbox": [41.060538, -3.232805, 41.221723, -3.111423],
+    "start": [41.061705, -3.223355],
+    "end": [41.20253, -3.111423],
+    "points": 417,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1w9PK.gpx",
+    "distance_km": 289.0,
+    "bbox": [40.465457, -3.333508, 41.20253, -3.061965],
+    "start": [41.20253, -3.111423],
+    "end": [40.465457, -3.26732],
+    "points": 622,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1wERz.gpx",
+    "distance_km": 133.2,
+    "bbox": [40.132757, -3.42676, 40.471162, -3.194958],
+    "start": [40.465427, -3.26735],
+    "end": [40.465433, -3.267357],
+    "points": 665,
+    "group": "Sur/suroeste de Anchuelo"
+  },
+  {
+    "name": "MapitRoute-1wGyf.gpx",
+    "distance_km": 72.8,
+    "bbox": [40.371765, -3.499402, 40.487385, -3.2676],
+    "start": [40.465623, -3.267633],
+    "end": [40.465772, -3.2676],
+    "points": 358,
+    "group": "Sur/suroeste de Anchuelo"
+  },
+  {
+    "name": "MapitRoute-1wR8n.gpx",
+    "distance_km": 198.2,
+    "bbox": [40.465185, -3.322817, 41.11767, -3.154865],
+    "start": [40.465508, -3.267455],
+    "end": [40.465473, -3.26736],
+    "points": 995,
+    "group": "Sierra Norte / Pueblos Negros"
+  },
+  {
+    "name": "MapitRoute-1wUTG.gpx",
+    "distance_km": 20.7,
+    "bbox": [40.46541, -3.267855, 40.498907, -3.159015],
+    "start": [40.465497, -3.267403],
+    "end": [40.46541, -3.26732],
+    "points": 49,
+    "group": "Local Anchuelo / Alcalá"
+  },
+  {
+    "name": "MapitRoute-1wZtf.gpx",
+    "distance_km": 66.8,
+    "bbox": [40.318172, -3.365388, 40.493798, -3.134412],
+    "start": [40.465435, -3.267123],
+    "end": [40.466265, -3.268402],
+    "points": 263,
+    "group": "Ruta 19 local sur/sureste"
+  },
+  {
+    "name": "MapitRoute-3Flwm.gpx",
+    "distance_km": 97.8,
+    "bbox": [40.446217, -3.454663, 40.684225, -3.267357],
+    "start": [40.446362, -3.362213],
+    "end": [40.465607, -3.267357],
+    "points": 323,
+    "group": "Ruta 22 nueva"
+  },
+  {
+    "name": "Ruta domingo.gpx",
+    "distance_km": 181.4,
+    "bbox": [40.450845, -3.368288, 40.886913, -2.881088],
+    "start": [40.465322, -3.26724],
+    "end": [40.465357, -3.26734],
+    "points": 640,
+    "group": "Sierra Norte / Pueblos Negros"
+  }
+]
