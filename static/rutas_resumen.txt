@@ -1,5 +1,5 @@
-Historial GPX completo cargado: 22 rutas/tramos
-Distancia acumulada aproximada: 4514.0 km
+Historial GPX completo cargado: 23 rutas/tramos
+Distancia acumulada aproximada: 5156.8 km
 
 1. MapitRoute-1vhTL.gpx — 133.0 km — Local Anchuelo / Alcalá — 538 puntos
 2. MapitRoute-1vPM2.gpx — 174.6 km — Sierra Norte / Pueblos Negros — 773 puntos
@@ -22,4 +22,5 @@ Distancia acumulada aproximada: 4514.0 km
 19. MapitRoute-1wUTG.gpx — 20.7 km — Alcarria / Cifuentes-Trillo — 49 puntos
 20. MapitRoute-1wZtf.gpx — 66.8 km — Alcarria / Cifuentes-Trillo — 263 puntos
 21. MapitRoute-3Flwm.gpx — 97.8 km — Ruta 22 nueva — 323 puntos
-22. Ruta domingo.gpx — 181.4 km — Alcarria / Cifuentes-Trillo — 640 puntos
+22. MapitRoute-3Frhp.gpx — 642.8 km — Alcarria / Cifuentes-Trillo — 1750 puntos
+23. Ruta domingo.gpx — 181.4 km — Alcarria / Cifuentes-Trillo — 640 puntos

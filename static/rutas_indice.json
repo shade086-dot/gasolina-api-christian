@@ -420,6 +420,26 @@
     "group": "Ruta 22 nueva"
   },
   {
+    "name": "MapitRoute-3Frhp.gpx",
+    "distance_km": 642.8,
+    "bbox": [
+      40.18534,
+      -3.365498,
+      40.493775,
+      -3.044632
+    ],
+    "start": [
+      40.465293,
+      -3.267273
+    ],
+    "end": [
+      40.465432,
+      -3.267378
+    ],
+    "points": 1750,
+    "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
     "name": "Ruta domingo.gpx",
     "distance_km": 181.4,
     "bbox": [
