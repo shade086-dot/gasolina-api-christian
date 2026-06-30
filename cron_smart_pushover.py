@@ -15,6 +15,10 @@ import cron_notify_pushover as notify
 STATE_FILE = Path(os.getenv("SMART_PUSHOVER_STATE_FILE", "/tmp/gasolina_smart_pushover_state.json"))
 TOLERANCE_MIN = int(os.getenv("SMART_TRIGGER_TOLERANCE_MIN", "18"))
 LOOKAHEAD_HOURS = int(os.getenv("SMART_LOOKAHEAD_HOURS", "36"))
+# Importante: para avisar de vueltas hay eventos que empezaron horas antes.
+# Si solo buscamos desde ahora-18min, el evento de oficina de la mañana desaparece
+# y nunca se detecta su hora de fin. Por defecto miramos 14h hacia atrás.
+LOOKBACK_HOURS = int(os.getenv("SMART_LOOKBACK_HOURS", "14"))
 FORUS_OUT_NOTICE_MIN = int(os.getenv("SMART_FORUS_OUT_NOTICE_MIN", "75"))
 FORUS_RETURN_NOTICE_MIN = int(os.getenv("SMART_FORUS_RETURN_NOTICE_MIN", "0"))
 FORUS_BLOCK_GAP_MIN = int(os.getenv("SMART_FORUS_BLOCK_GAP_MIN", "45"))
@@ -23,6 +27,7 @@ OFFICE_RETURN_NOTICE_MIN = int(os.getenv("SMART_OFFICE_RETURN_NOTICE_MIN", "0"))
 TRAVEL_NOTICE_MIN = int(os.getenv("SMART_TRAVEL_NOTICE_MIN", "120"))
 TRAVEL_DAY_NOTICE_HOUR = int(os.getenv("SMART_TRAVEL_DAY_NOTICE_HOUR", "9"))
 DRY_RUN = os.getenv("SMART_DRY_RUN", "false").lower() in {"1", "true", "yes"}
+DEBUG = os.getenv("SMART_DEBUG", "false").lower() in {"1", "true", "yes"}
 
 
 def _now() -> datetime:
@@ -82,6 +87,25 @@ def _keywords() -> tuple[list[str], list[str]]:
 def _event_dt(event: dict[str, Any], key: str) -> datetime | None:
     value = event.get(key)
     return value if isinstance(value, datetime) else None
+
+
+def _debug_events(events: list[dict[str, Any]], now: datetime) -> None:
+    if not DEBUG:
+        return
+    forus_keywords, office_keywords = _keywords()
+    print(f"[smart-debug] Ahora: {now.isoformat()} · eventos={len(events)}")
+    for event in events:
+        start = _event_dt(event, "start")
+        end = _event_dt(event, "end")
+        summary = str(event.get("summary") or "")
+        location = str(event.get("location") or "")
+        is_forus = api.event_matches(event, forus_keywords)
+        is_office = api.event_matches(event, office_keywords)
+        print(
+            "[smart-debug] "
+            f"start={start} end={end} forus={is_forus} office={is_office} "
+            f"summary={summary!r} location={location!r}"
+        )
 
 
 def _group_forus_events(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -240,15 +264,16 @@ def _send_action(action: dict[str, Any]) -> None:
 
 async def amain() -> int:
     now = _now()
-    start = now - timedelta(minutes=TOLERANCE_MIN)
+    start = now - timedelta(hours=LOOKBACK_HOURS)
     end = now + timedelta(hours=LOOKAHEAD_HOURS)
     events = await api.fetch_public_calendar_events_for_range(start, end)
+    _debug_events(events, now)
     actions = _build_actions(events, now)
     state = _load_state()
 
     pending = [a for a in actions if a["key"] not in state]
     if not pending:
-        print(f"[smart] Sin avisos. Eventos revisados: {len(events)}. Acciones candidatas: {len(actions)}.")
+        print(f"[smart] Sin avisos. Eventos revisados: {len(events)}. Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h.")
         _save_state(state)
         return 0
 
@@ -260,9 +285,5 @@ async def amain() -> int:
     return 0
 
 
-def main() -> int:
-    return asyncio.run(amain())
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(amain()))
