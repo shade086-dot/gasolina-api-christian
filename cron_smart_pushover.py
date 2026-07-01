@@ -13,9 +13,9 @@ import main as api
 import cron_notify_pushover as notify
 
 STATE_FILE = Path(os.getenv("SMART_PUSHOVER_STATE_FILE", "/tmp/gasolina_smart_pushover_state.json"))
-# El cron suele ir cada 15 min. Con 18 min podía avisar dos veces si el estado no persistía entre runs.
-# 9 min mantiene margen suficiente y evita repeticiones continuas en la cadencia de 15 min.
-TOLERANCE_MIN = int(os.getenv("SMART_TRIGGER_TOLERANCE_MIN", "9"))
+# El cron suele ir cada 15 min. Aunque Render tenga SMART_TRIGGER_TOLERANCE_MIN=18,
+# lo limitamos a 9 para que no se solapen el aviso de 45 y el de 30.
+TOLERANCE_MIN = min(int(os.getenv("SMART_TRIGGER_TOLERANCE_MIN", "9")), 9)
 LOOKAHEAD_HOURS = int(os.getenv("SMART_LOOKAHEAD_HOURS", "36"))
 # Importante: para avisar de vueltas hay eventos que empezaron horas antes.
 # Si solo buscamos desde ahora-18min, el evento de oficina de la mañana desaparece
@@ -297,7 +297,9 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
                 "event": api.serialize_calendar_event(event),
             })
 
-    actions.sort(key=lambda a: a.get("target") or now)
+    # Si por configuración antigua se solapan ventanas, elegimos primero el aviso más reciente.
+    # Así a las 08:30 gana aviso 30 min frente a aviso 45 min.
+    actions.sort(key=lambda a: a.get("target") or now, reverse=True)
     return actions
 
 
@@ -337,7 +339,7 @@ async def amain() -> int:
         print(
             f"[smart] Sin avisos. Eventos revisados: {len(events)}. "
             f"Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. "
-            f"Tolerancia: {TOLERANCE_MIN}min. Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}."
+            f"Tolerancia efectiva: {TOLERANCE_MIN}min. Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}."
         )
         _save_state(state)
         return 0
