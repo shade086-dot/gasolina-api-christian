@@ -1,7 +1,7 @@
 [
   {
     "name": "MapitRoute-1vhTL.gpx",
-    "distance_km": 133.0,
+    "distance_km": 116.1,
     "bbox": [
       40.398437,
       -3.44554,
@@ -16,12 +16,13 @@
       40.495357,
       -3.358787
     ],
-    "points": 538,
+    "points": 536,
+    "segments": 2,
     "group": "Local Anchuelo / Alcalá"
   },
   {
     "name": "MapitRoute-1vPM2.gpx",
-    "distance_km": 174.6,
+    "distance_km": 174.2,
     "bbox": [
       40.475862,
       -3.401872,
@@ -36,12 +37,13 @@
       40.477157,
       -3.391787
     ],
-    "points": 773,
+    "points": 771,
+    "segments": 1,
     "group": "Sierra Norte / Pueblos Negros"
   },
   {
     "name": "MapitRoute-1vu9H.gpx",
-    "distance_km": 186.9,
+    "distance_km": 82.4,
     "bbox": [
       40.450057,
       -3.368317,
@@ -56,12 +58,13 @@
       40.50636,
       -2.743885
     ],
-    "points": 510,
+    "points": 508,
+    "segments": 1,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1vuBS.gpx",
-    "distance_km": 27.2,
+    "distance_km": 12.1,
     "bbox": [
       40.506218,
       -2.756057,
@@ -76,12 +79,13 @@
       40.573968,
       -2.752302
     ],
-    "points": 125,
+    "points": 123,
+    "segments": 1,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1vuCz.gpx",
-    "distance_km": 60.9,
+    "distance_km": 40.5,
     "bbox": [
       40.481192,
       -2.79763,
@@ -96,12 +100,13 @@
       40.483413,
       -2.733488
     ],
-    "points": 193,
+    "points": 191,
+    "segments": 1,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1vuEH.gpx",
-    "distance_km": 171.3,
+    "distance_km": 80.9,
     "bbox": [
       40.465477,
       -3.291652,
@@ -116,12 +121,13 @@
       40.465477,
       -3.267375
     ],
-    "points": 311,
+    "points": 309,
+    "segments": 1,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1vZ3Z.gpx",
-    "distance_km": 545.0,
+    "distance_km": 208.9,
     "bbox": [
       40.451338,
       -3.761162,
@@ -136,12 +142,13 @@
       41.930528,
       -3.760078
     ],
-    "points": 609,
+    "points": 607,
+    "segments": 2,
     "group": "Rutas realizadas"
   },
   {
     "name": "MapitRoute-1vZ5z.gpx",
-    "distance_km": 570.3,
+    "distance_km": 236.5,
     "bbox": [
       41.92992,
       -3.778083,
@@ -156,12 +163,13 @@
       43.37768,
       -3.21994
     ],
-    "points": 868,
+    "points": 866,
+    "segments": 1,
     "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
   },
   {
     "name": "MapitRoute-1vZ9w.gpx",
-    "distance_km": 90.1,
+    "distance_km": 50.5,
     "bbox": [
       43.289475,
       -3.326948,
@@ -176,12 +184,13 @@
       43.293435,
       -3.003913
     ],
-    "points": 250,
+    "points": 248,
+    "segments": 1,
     "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
   },
   {
     "name": "MapitRoute-1vZDy.gpx",
-    "distance_km": 66.7,
+    "distance_km": 27.0,
     "bbox": [
       43.291538,
       -3.22125,
@@ -196,12 +205,13 @@
       43.377653,
       -3.220262
     ],
-    "points": 144,
+    "points": 142,
+    "segments": 1,
     "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
   },
   {
     "name": "MapitRoute-1vZp8.gpx",
-    "distance_km": 1118.6,
+    "distance_km": 470.9,
     "bbox": [
       40.450942,
       -3.778303,
@@ -216,12 +226,13 @@
       40.465455,
       -3.267347
     ],
-    "points": 1552,
+    "points": 1550,
+    "segments": 2,
     "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
   },
   {
     "name": "MapitRoute-1w9N6.gpx",
-    "distance_km": 204.0,
+    "distance_km": 80.3,
     "bbox": [
       40.465557,
       -3.289257,
@@ -236,12 +247,13 @@
       41.021122,
       -3.236373
     ],
-    "points": 315,
+    "points": 313,
+    "segments": 2,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1w9OI.gpx",
-    "distance_km": 17.2,
+    "distance_km": 7.9,
     "bbox": [
       41.021122,
       -3.236373,
@@ -256,12 +268,13 @@
       41.061705,
       -3.223355
     ],
-    "points": 57,
+    "points": 55,
+    "segments": 2,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1w9OS.gpx",
-    "distance_km": 88.3,
+    "distance_km": 51.8,
     "bbox": [
       41.060538,
       -3.232805,
@@ -276,12 +289,13 @@
       41.20253,
       -3.111423
     ],
-    "points": 417,
+    "points": 415,
+    "segments": 3,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1w9PK.gpx",
-    "distance_km": 289.0,
+    "distance_km": 122.9,
     "bbox": [
       40.465457,
       -3.333508,
@@ -296,7 +310,8 @@
       40.465457,
       -3.26732
     ],
-    "points": 622,
+    "points": 620,
+    "segments": 3,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
@@ -316,12 +331,13 @@
       40.465433,
       -3.267357
     ],
-    "points": 665,
+    "points": 663,
+    "segments": 2,
     "group": "Sur/suroeste de Anchuelo"
   },
   {
     "name": "MapitRoute-1wGyf.gpx",
-    "distance_km": 72.8,
+    "distance_km": 72.7,
     "bbox": [
       40.371765,
       -3.499402,
@@ -336,12 +352,13 @@
       40.465772,
       -3.2676
     ],
-    "points": 358,
+    "points": 356,
+    "segments": 1,
     "group": "Sur/suroeste de Anchuelo"
   },
   {
     "name": "MapitRoute-1wR8n.gpx",
-    "distance_km": 198.2,
+    "distance_km": 198.1,
     "bbox": [
       40.465185,
       -3.322817,
@@ -356,7 +373,8 @@
       40.465473,
       -3.26736
     ],
-    "points": 995,
+    "points": 993,
+    "segments": 4,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
@@ -376,12 +394,13 @@
       40.46541,
       -3.26732
     ],
-    "points": 49,
+    "points": 47,
+    "segments": 4,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-1wZtf.gpx",
-    "distance_km": 66.8,
+    "distance_km": 66.5,
     "bbox": [
       40.318172,
       -3.365388,
@@ -396,12 +415,13 @@
       40.466265,
       -3.268402
     ],
-    "points": 263,
+    "points": 261,
+    "segments": 1,
     "group": "Alcarria / Cifuentes-Trillo"
   },
   {
     "name": "MapitRoute-3Flwm.gpx",
-    "distance_km": 97.8,
+    "distance_km": 81.2,
     "bbox": [
       40.446217,
       -3.454663,
@@ -416,7 +436,8 @@
       40.465607,
       -3.267357
     ],
-    "points": 323,
+    "points": 321,
+    "segments": 1,
     "group": "Ruta 22 nueva"
   },
   {
@@ -436,7 +457,8 @@
       40.465357,
       -3.26734
     ],
-    "points": 640,
+    "points": 638,
+    "segments": 4,
     "group": "Alcarria / Cifuentes-Trillo"
   }
 ]

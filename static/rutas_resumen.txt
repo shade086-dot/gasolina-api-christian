@@ -1,25 +1,25 @@
 Historial GPX completo cargado: 22 rutas/tramos
-Distancia acumulada aproximada: 4514.0 km
+Distancia acumulada aproximada: 2516.7 km
 
-1. MapitRoute-1vhTL.gpx — 133.0 km — Local Anchuelo / Alcalá — 538 puntos
-2. MapitRoute-1vPM2.gpx — 174.6 km — Sierra Norte / Pueblos Negros — 773 puntos
-3. MapitRoute-1vu9H.gpx — 186.9 km — Alcarria / Cifuentes-Trillo — 510 puntos
-4. MapitRoute-1vuBS.gpx — 27.2 km — Alcarria / Cifuentes-Trillo — 125 puntos
-5. MapitRoute-1vuCz.gpx — 60.9 km — Alcarria / Cifuentes-Trillo — 193 puntos
-6. MapitRoute-1vuEH.gpx — 171.3 km — Alcarria / Cifuentes-Trillo — 311 puntos
-7. MapitRoute-1vZ3Z.gpx — 545.0 km — Rutas realizadas — 609 puntos
-8. MapitRoute-1vZ5z.gpx — 570.3 km — Corredor norte / Burgos / Cantabria / Bizkaia — 868 puntos
-9. MapitRoute-1vZ9w.gpx — 90.1 km — Corredor norte / Burgos / Cantabria / Bizkaia — 250 puntos
-10. MapitRoute-1vZDy.gpx — 66.7 km — Corredor norte / Burgos / Cantabria / Bizkaia — 144 puntos
-11. MapitRoute-1vZp8.gpx — 1118.6 km — Corredor norte / Burgos / Cantabria / Bizkaia — 1552 puntos
-12. MapitRoute-1w9N6.gpx — 204.0 km — Alcarria / Cifuentes-Trillo — 315 puntos
-13. MapitRoute-1w9OI.gpx — 17.2 km — Alcarria / Cifuentes-Trillo — 57 puntos
-14. MapitRoute-1w9OS.gpx — 88.3 km — Alcarria / Cifuentes-Trillo — 417 puntos
-15. MapitRoute-1w9PK.gpx — 289.0 km — Alcarria / Cifuentes-Trillo — 622 puntos
-16. MapitRoute-1wERz.gpx — 133.2 km — Sur/suroeste de Anchuelo — 665 puntos
-17. MapitRoute-1wGyf.gpx — 72.8 km — Sur/suroeste de Anchuelo — 358 puntos
-18. MapitRoute-1wR8n.gpx — 198.2 km — Alcarria / Cifuentes-Trillo — 995 puntos
-19. MapitRoute-1wUTG.gpx — 20.7 km — Alcarria / Cifuentes-Trillo — 49 puntos
-20. MapitRoute-1wZtf.gpx — 66.8 km — Alcarria / Cifuentes-Trillo — 263 puntos
-21. MapitRoute-3Flwm.gpx — 97.8 km — Ruta 22 nueva — 323 puntos
-22. Ruta domingo.gpx — 181.4 km — Alcarria / Cifuentes-Trillo — 640 puntos
+1. MapitRoute-1vhTL.gpx — 116.1 km — Local Anchuelo / Alcalá — 536 puntos — 2 segmentos
+2. MapitRoute-1vPM2.gpx — 174.2 km — Sierra Norte / Pueblos Negros — 771 puntos — 1 segmentos
+3. MapitRoute-1vu9H.gpx — 82.4 km — Alcarria / Cifuentes-Trillo — 508 puntos — 1 segmentos
+4. MapitRoute-1vuBS.gpx — 12.1 km — Alcarria / Cifuentes-Trillo — 123 puntos — 1 segmentos
+5. MapitRoute-1vuCz.gpx — 40.5 km — Alcarria / Cifuentes-Trillo — 191 puntos — 1 segmentos
+6. MapitRoute-1vuEH.gpx — 80.9 km — Alcarria / Cifuentes-Trillo — 309 puntos — 1 segmentos
+7. MapitRoute-1vZ3Z.gpx — 208.9 km — Rutas realizadas — 607 puntos — 2 segmentos
+8. MapitRoute-1vZ5z.gpx — 236.5 km — Corredor norte / Burgos / Cantabria / Bizkaia — 866 puntos — 1 segmentos
+9. MapitRoute-1vZ9w.gpx — 50.5 km — Corredor norte / Burgos / Cantabria / Bizkaia — 248 puntos — 1 segmentos
+10. MapitRoute-1vZDy.gpx — 27.0 km — Corredor norte / Burgos / Cantabria / Bizkaia — 142 puntos — 1 segmentos
+11. MapitRoute-1vZp8.gpx — 470.9 km — Corredor norte / Burgos / Cantabria / Bizkaia — 1550 puntos — 2 segmentos
+12. MapitRoute-1w9N6.gpx — 80.3 km — Alcarria / Cifuentes-Trillo — 313 puntos — 2 segmentos
+13. MapitRoute-1w9OI.gpx — 7.9 km — Alcarria / Cifuentes-Trillo — 55 puntos — 2 segmentos
+14. MapitRoute-1w9OS.gpx — 51.8 km — Alcarria / Cifuentes-Trillo — 415 puntos — 3 segmentos
+15. MapitRoute-1w9PK.gpx — 122.9 km — Alcarria / Cifuentes-Trillo — 620 puntos — 3 segmentos
+16. MapitRoute-1wERz.gpx — 133.2 km — Sur/suroeste de Anchuelo — 663 puntos — 2 segmentos
+17. MapitRoute-1wGyf.gpx — 72.7 km — Sur/suroeste de Anchuelo — 356 puntos — 1 segmentos
+18. MapitRoute-1wR8n.gpx — 198.1 km — Alcarria / Cifuentes-Trillo — 993 puntos — 4 segmentos
+19. MapitRoute-1wUTG.gpx — 20.7 km — Alcarria / Cifuentes-Trillo — 47 puntos — 4 segmentos
+20. MapitRoute-1wZtf.gpx — 66.5 km — Alcarria / Cifuentes-Trillo — 261 puntos — 1 segmentos
+21. MapitRoute-3Flwm.gpx — 81.2 km — Ruta 22 nueva — 321 puntos — 1 segmentos
+22. Ruta domingo.gpx — 181.4 km — Alcarria / Cifuentes-Trillo — 638 puntos — 4 segmentos
