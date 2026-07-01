@@ -22,9 +22,11 @@ LOOKAHEAD_HOURS = int(os.getenv("SMART_LOOKAHEAD_HOURS", "36"))
 # y nunca se detecta su hora de fin. Por defecto miramos 14h hacia atrás.
 LOOKBACK_HOURS = int(os.getenv("SMART_LOOKBACK_HOURS", "14"))
 
-# Doble aviso para salidas desde casa: por defecto 45 y 30 min antes del evento.
+# Avisos de ida generales, por ejemplo oficina: 45 y 30 min antes.
 # Se puede cambiar en Render con SMART_OUT_NOTICE_MINS="60,30" o SMART_OUT_NOTICE_MINS="45,30".
 OUT_NOTICE_MINS_RAW = os.getenv("SMART_OUT_NOTICE_MINS", "45,30")
+# Forus tiene regla propia: 75 y 60 min antes del primer evento del bloque.
+FORUS_OUT_NOTICE_MINS_RAW = os.getenv("SMART_FORUS_OUT_NOTICE_MINS", "75,60")
 # Vuelta a casa de oficina: 30 y 15 min antes. Quitamos el 0 para que no te salte justo a la hora.
 # Forus mantiene su propia regla: aviso al finalizar todo el bloque.
 RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "30,15")
@@ -65,6 +67,10 @@ def _parse_notice_offsets(raw: str, fallback: int) -> list[int]:
 
 def _out_notice_offsets(fallback: int) -> list[int]:
     return _parse_notice_offsets(OUT_NOTICE_MINS_RAW, fallback)
+
+
+def _forus_out_notice_offsets(fallback: int) -> list[int]:
+    return _parse_notice_offsets(FORUS_OUT_NOTICE_MINS_RAW, fallback)
 
 
 def _return_notice_offsets(fallback: int) -> list[int]:
@@ -253,7 +259,7 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
     actions: list[dict[str, Any]] = []
     _forus_keywords, office_keywords = _keywords()
 
-    # Forus: dos avisos de ida antes de la primera clase del bloque; vuelta justo al terminar el último evento seguido.
+    # Forus: avisos propios de ida antes de la primera clase del bloque; vuelta justo al terminar el último evento seguido.
     for group in _group_forus_events(events):
         starts = [_event_dt(e, "start") for e in group if _event_dt(e, "start")]
         ends = [(_event_dt(e, "end") or _event_dt(e, "start")) for e in group if _event_dt(e, "start")]
@@ -271,7 +277,7 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
             segment="forus_out",
             event_time=first_start,
             event=first_event,
-            offsets=_out_notice_offsets(FORUS_OUT_NOTICE_MIN),
+            offsets=_forus_out_notice_offsets(FORUS_OUT_NOTICE_MIN),
             now=now,
         )
 
@@ -384,7 +390,8 @@ async def amain() -> int:
             f"[smart] Sin avisos. Eventos revisados: {len(events)}. "
             f"Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. "
             f"Tolerancia efectiva: {TOLERANCE_MIN}min. "
-            f"Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}. "
+            f"Avisos ida oficina: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}. "
+            f"Avisos ida Forus: {_forus_out_notice_offsets(FORUS_OUT_NOTICE_MIN)}. "
             f"Avisos vuelta oficina: {_return_notice_offsets(OFFICE_RETURN_NOTICE_MIN)}. "
             f"Forus vuelta: {[FORUS_RETURN_NOTICE_MIN]}. "
             f"Resumen nocturno: {NIGHT_NEXT_NOTICE_HOUR:02d}:{NIGHT_NEXT_NOTICE_MINUTE:02d}."
