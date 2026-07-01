@@ -460,5 +460,26 @@
     "points": 638,
     "segments": 4,
     "group": "Alcarria / Cifuentes-Trillo"
+  },
+  {
+    "name": "Ruta_Estremera_2026-07-01.gpx",
+    "distance_km": 108.0,
+    "bbox": [
+      40.185345,
+      -3.365498,
+      40.493775,
+      -3.044632
+    ],
+    "start": [
+      40.465293,
+      -3.267273
+    ],
+    "end": [
+      40.465432,
+      -3.267378
+    ],
+    "points": 665,
+    "segments": 4,
+    "group": "Alcarria / Cifuentes-Trillo"
   }
 ]
