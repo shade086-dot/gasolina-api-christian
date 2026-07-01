@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -135,10 +136,10 @@ async function improveVisualRouteWithOsrm() {
 
     if (waypoints.length < 2) return;
     const coords = waypoints.map(p => p[1].toFixed(6) + ',' + p[0].toFixed(6)).join(';');
-    const url = 'https://router.project-osrm.org/route/v1/driving/' + coords + '?overview=full&geometries=geojson&alternatives=false&steps=false';
+    const url = '/visual-route-osrm?coords=' + encodeURIComponent(coords);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4500);
-    const response = await fetch(url, { signal: controller.signal });
+    const timer = setTimeout(() => controller.abort(), 5500);
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
     clearTimeout(timer);
     if (!response.ok) return;
     const data = await response.json();
@@ -152,6 +153,8 @@ async function improveVisualRouteWithOsrm() {
     } else {
       window.visualRouteLine = L.polyline(latlngs, {color:'#2563eb', weight:6, opacity:.84}).addTo(map);
     }
+    const bounds = L.latLngBounds(latlngs);
+    if (bounds && bounds.isValid && bounds.isValid()) map.fitBounds(bounds, { padding: [35, 35] });
     const mapDistance = document.getElementById('mapDistance');
     if (mapDistance && !mapDistance.textContent.includes('carretera')) {
       mapDistance.textContent = mapDistance.textContent + ' · trazado carretera';
@@ -162,6 +165,13 @@ async function improveVisualRouteWithOsrm() {
 }
 improveVisualRouteWithOsrm();
 """
+
+
+def _insert_before_last_script_close(page: str, script: str) -> str:
+    idx = page.rfind("</script>")
+    if idx == -1:
+        return page
+    return page[:idx] + script + "\n" + page[idx:]
 
 
 def install(main_module: Any) -> None:
@@ -217,10 +227,38 @@ def install(main_module: Any) -> None:
             "Mapa visual: origen → parada recomendada → destino. Si OSRM responde, la línea azul se ajusta a carretera en segundo plano.",
         )
         if "improveVisualRouteWithOsrm" not in page:
-            page = page.replace("</script>", _CLIENT_OSRM_SCRIPT + "\n</script>", 1)
+            page = _insert_before_last_script_close(page, _CLIENT_OSRM_SCRIPT)
         return page
+
+    app = getattr(main_module, "app", None)
+    if app is not None:
+        from fastapi import Query
+        from fastapi.responses import JSONResponse
+
+        @app.get("/visual-route-osrm")
+        async def visual_route_osrm(coords: str = Query(default="")) -> JSONResponse:
+            if not re.fullmatch(r"[-0-9.,;]+", coords or ""):
+                return JSONResponse({"status": "error", "error": "coords invalid"}, status_code=400)
+            parts = [p for p in coords.split(";") if p]
+            if len(parts) < 2 or len(parts) > 6:
+                return JSONResponse({"status": "error", "error": "coords count invalid"}, status_code=400)
+            try:
+                # Validación básica lon,lat.
+                for part in parts:
+                    lon_s, lat_s = part.split(",", 1)
+                    lon = float(lon_s); lat = float(lat_s)
+                    if not (-10.5 <= lon <= 5.0 and 35.0 <= lat <= 45.0):
+                        return JSONResponse({"status": "error", "error": "coords out of bounds"}, status_code=400)
+                base = os.getenv("VISUAL_ROUTE_OSRM_BASE_URL", os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org")).rstrip("/")
+                url = f"{base}/route/v1/driving/{coords}?overview=full&geometries=geojson&alternatives=false&steps=false"
+                timeout = main_module.httpx.Timeout(5.0, connect=2.5)
+                async with main_module.httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                    resp = await client.get(url, headers={"User-Agent": "gasolina-api-christian/visual-route/1.1"})
+                return JSONResponse(resp.json(), status_code=resp.status_code)
+            except Exception as exc:
+                return JSONResponse({"status": "error", "error": f"{type(exc).__name__}: {exc}"}, status_code=502)
 
     main_module.build_visual_route_points = road_visual_route_points
     main_module.render_visual_map_html = render_visual_map_html
     setattr(main_module, "_visual_route_ext_installed", True)
-    print("[visual-route] Trazado visual instalado: origen → parada → destino + OSRM cliente")
+    print("[visual-route] Trazado visual instalado: origen → parada → destino + proxy OSRM cliente")
