@@ -25,9 +25,9 @@ LOOKBACK_HOURS = int(os.getenv("SMART_LOOKBACK_HOURS", "14"))
 # Doble aviso para salidas desde casa: por defecto 45 y 30 min antes del evento.
 # Se puede cambiar en Render con SMART_OUT_NOTICE_MINS="60,30" o SMART_OUT_NOTICE_MINS="45,30".
 OUT_NOTICE_MINS_RAW = os.getenv("SMART_OUT_NOTICE_MINS", "45,30")
-# Vuelta a casa: antes estaba solo en 0 min. Con cron cada 15 min podía perderse
-# si Render ejecutaba a :45 y luego :15. Ahora avisa 15 min antes y al terminar.
-RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "15,0")
+# Vuelta a casa de oficina: 30 y 15 min antes. Quitamos el 0 para que no te salte justo a la hora.
+# Forus mantiene su propia regla: aviso al finalizar todo el bloque.
+RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "30,15")
 
 FORUS_OUT_NOTICE_MIN = int(os.getenv("SMART_FORUS_OUT_NOTICE_MIN", "75"))
 FORUS_RETURN_NOTICE_MIN = int(os.getenv("SMART_FORUS_RETURN_NOTICE_MIN", "0"))
@@ -36,6 +36,8 @@ OFFICE_OUT_NOTICE_MIN = int(os.getenv("SMART_OFFICE_OUT_NOTICE_MIN", "60"))
 OFFICE_RETURN_NOTICE_MIN = int(os.getenv("SMART_OFFICE_RETURN_NOTICE_MIN", "0"))
 TRAVEL_NOTICE_MIN = int(os.getenv("SMART_TRAVEL_NOTICE_MIN", "120"))
 TRAVEL_DAY_NOTICE_HOUR = int(os.getenv("SMART_TRAVEL_DAY_NOTICE_HOUR", "9"))
+NIGHT_NEXT_NOTICE_HOUR = int(os.getenv("SMART_NIGHT_NEXT_NOTICE_HOUR", "23"))
+NIGHT_NEXT_NOTICE_MINUTE = int(os.getenv("SMART_NIGHT_NEXT_NOTICE_MINUTE", "0"))
 DRY_RUN = os.getenv("SMART_DRY_RUN", "false").lower() in {"1", "true", "yes"}
 DEBUG = os.getenv("SMART_DEBUG", "false").lower() in {"1", "true", "yes"}
 
@@ -209,6 +211,44 @@ def _append_timed_actions(
             })
 
 
+def _append_night_next_action(actions: list[dict[str, Any]], events: list[dict[str, Any]], now: datetime) -> None:
+    target = now.replace(hour=NIGHT_NEXT_NOTICE_HOUR, minute=NIGHT_NEXT_NOTICE_MINUTE, second=0, microsecond=0)
+    if not _inside_window(now, target):
+        return
+
+    forus_keywords, office_keywords = _keywords()
+    candidates: list[tuple[datetime, str, str, dict[str, Any]]] = []
+
+    # Próximo evento de oficina: salida casa → Cabanillas.
+    for event in events:
+        if not api.event_matches(event, office_keywords):
+            continue
+        start = _event_dt(event, "start")
+        if start and start > now and start.date() > now.date():
+            candidates.append((start, "cabanillas_out", "Mañana oficina", event))
+
+    # Próximo bloque Forus del día siguiente: salida casa → Forus.
+    for group in _group_forus_events(events):
+        starts = [_event_dt(e, "start") for e in group if _event_dt(e, "start")]
+        if not starts:
+            continue
+        first_start = min(starts)
+        if first_start > now and first_start.date() > now.date():
+            candidates.append((first_start, "forus_out", "Mañana Forus", group[0]))
+
+    if not candidates:
+        return
+
+    event_time, segment, kind, event = sorted(candidates, key=lambda item: item[0])[0]
+    actions.append({
+        "key": f"night_next:{event_time.date().isoformat()}:{segment}:{_event_id(event)}",
+        "kind": f"{kind} · aviso 23:00",
+        "segment": segment,
+        "target": target,
+        "event": api.serialize_calendar_event(event),
+    })
+
+
 def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     _forus_keywords, office_keywords = _keywords()
@@ -242,11 +282,11 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
             segment="forus_return",
             event_time=last_end,
             event=last_event,
-            offsets=_return_notice_offsets(FORUS_RETURN_NOTICE_MIN),
+            offsets=[FORUS_RETURN_NOTICE_MIN],
             now=now,
         )
 
-    # Oficina: dos avisos de ida antes de empezar y vuelta al terminar el evento de oficina.
+    # Oficina: dos avisos de ida antes de empezar y vuelta 30/15 min antes de terminar.
     for event in events:
         if not api.event_matches(event, office_keywords):
             continue
@@ -299,6 +339,8 @@ def _build_actions(events: list[dict[str, Any]], now: datetime) -> list[dict[str
                 "event": api.serialize_calendar_event(event),
             })
 
+    _append_night_next_action(actions, events, now)
+
     # Si por configuración antigua se solapan ventanas, elegimos primero el aviso más reciente.
     # Así a las 08:30 gana aviso 30 min frente a aviso 45 min.
     actions.sort(key=lambda a: a.get("target") or now, reverse=True)
@@ -343,7 +385,9 @@ async def amain() -> int:
             f"Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. "
             f"Tolerancia efectiva: {TOLERANCE_MIN}min. "
             f"Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}. "
-            f"Avisos vuelta: {_return_notice_offsets(OFFICE_RETURN_NOTICE_MIN)}."
+            f"Avisos vuelta oficina: {_return_notice_offsets(OFFICE_RETURN_NOTICE_MIN)}. "
+            f"Forus vuelta: {[FORUS_RETURN_NOTICE_MIN]}. "
+            f"Resumen nocturno: {NIGHT_NEXT_NOTICE_HOUR:02d}:{NIGHT_NEXT_NOTICE_MINUTE:02d}."
         )
         _save_state(state)
         return 0
