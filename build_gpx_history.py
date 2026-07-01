@@ -41,20 +41,76 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * radius * math.asin(math.sqrt(h))
 
 
-def parse_gpx_points(text: str) -> list[tuple[float, float]]:
+def _lat_lon(elem: ET.Element) -> tuple[float, float] | None:
+    lat = elem.attrib.get("lat")
+    lon = elem.attrib.get("lon")
+    if lat is None or lon is None:
+        return None
+    try:
+        return float(lat), float(lon)
+    except ValueError:
+        return None
+
+
+def _tag(elem: ET.Element) -> str:
+    return elem.tag.rsplit("}", 1)[-1]
+
+
+def parse_gpx_segments(text: str) -> list[list[tuple[float, float]]]:
+    """Lee el GPX respetando segmentos reales.
+
+    Muy importante: NO mezclamos los <wpt> start/end con los <trkpt>.
+    Muchos GPX de Mapit traen waypoints de inicio/fin antes del track; si se meten
+    en la misma polilínea, Leaflet dibuja líneas rectas cruzando media ruta.
+    """
     root = ET.fromstring(text.encode("utf-8"))
-    points: list[tuple[float, float]] = []
+    segments: list[list[tuple[float, float]]] = []
+
+    # Preferimos tracks reales, separando cada trkseg para no unir cortes de señal.
+    for trkseg in [e for e in root.iter() if _tag(e) == "trkseg"]:
+        pts: list[tuple[float, float]] = []
+        for child in trkseg:
+            if _tag(child) != "trkpt":
+                continue
+            point = _lat_lon(child)
+            if point is not None:
+                pts.append(point)
+        if len(pts) >= 2:
+            segments.append(pts)
+
+    if segments:
+        return segments
+
+    # Fallback para GPX que vengan como ruta <rte><rtept>.
+    for rte in [e for e in root.iter() if _tag(e) == "rte"]:
+        pts = []
+        for child in rte:
+            if _tag(child) != "rtept":
+                continue
+            point = _lat_lon(child)
+            if point is not None:
+                pts.append(point)
+        if len(pts) >= 2:
+            segments.append(pts)
+
+    if segments:
+        return segments
+
+    # Último recurso: solo si el GPX no tiene track ni route, usamos waypoints.
+    pts = []
     for elem in root.iter():
-        tag = elem.tag.rsplit("}", 1)[-1]
-        if tag in {"trkpt", "rtept", "wpt"}:
-            lat = elem.attrib.get("lat")
-            lon = elem.attrib.get("lon")
-            if lat is None or lon is None:
-                continue
-            try:
-                points.append((float(lat), float(lon)))
-            except ValueError:
-                continue
+        if _tag(elem) != "wpt":
+            continue
+        point = _lat_lon(elem)
+        if point is not None:
+            pts.append(point)
+    return [pts] if len(pts) >= 2 else []
+
+
+def parse_gpx_points(text: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for segment in parse_gpx_segments(text):
+        points.extend(segment)
     return points
 
 
@@ -117,18 +173,33 @@ def simplify_points(points: list[tuple[float, float]], limit: int = 850) -> list
     return [[round(lat, 6), round(lon, 6)] for lat, lon in selected]
 
 
-def build_index() -> tuple[list[dict], dict[str, list[list[float]]]]:
+def simplify_segments(segments: list[list[tuple[float, float]]], total_limit: int = 850) -> list[list[list[float]]]:
+    if not segments:
+        return []
+    total_points = sum(len(s) for s in segments)
+    simplified: list[list[list[float]]] = []
+    for segment in segments:
+        if len(segment) < 2:
+            continue
+        share = max(20, round(total_limit * (len(segment) / max(total_points, 1))))
+        simplified.append(simplify_points(segment, share))
+    return simplified
+
+
+def build_index() -> tuple[list[dict], dict[str, list[list[list[float]]]]]:
     routes: list[dict] = []
-    polylines: dict[str, list[list[float]]] = {}
+    polylines: dict[str, list[list[list[float]]]] = {}
     for name, text in read_gpx_sources():
         try:
-            points = parse_gpx_points(text)
+            segments = parse_gpx_segments(text)
         except Exception as exc:
             print(f"[warn] No se pudo leer {name}: {type(exc).__name__}: {exc}")
             continue
+        points = [p for segment in segments for p in segment]
         if len(points) < 2:
             continue
-        distance = sum(haversine_km(a, b) for a, b in zip(points, points[1:]))
+        # Distancia por segmento: no conectamos cortes de señal ni waypoints sueltos.
+        distance = sum(haversine_km(a, b) for segment in segments for a, b in zip(segment, segment[1:]))
         lats = [p[0] for p in points]
         lons = [p[1] for p in points]
         bbox = [min(lats), min(lons), max(lats), max(lons)]
@@ -136,13 +207,14 @@ def build_index() -> tuple[list[dict], dict[str, list[list[float]]]]:
             "name": name,
             "distance_km": round(distance, 1),
             "bbox": [round(x, 6) for x in bbox],
-            "start": [round(points[0][0], 6), round(points[0][1], 6)],
-            "end": [round(points[-1][0], 6), round(points[-1][1], 6)],
+            "start": [round(segments[0][0][0], 6), round(segments[0][0][1], 6)],
+            "end": [round(segments[-1][-1][0], 6), round(segments[-1][-1][1], 6)],
             "points": len(points),
+            "segments": len(segments),
             "group": route_group(name, bbox),
         }
         routes.append(route)
-        polylines[name] = simplify_points(points)
+        polylines[name] = simplify_segments(segments)
     return routes, polylines
 
 
@@ -154,13 +226,14 @@ def write_summary(routes: list[dict]) -> None:
         "",
     ]
     for idx, route in enumerate(routes, 1):
+        segments = int(route.get("segments") or 1)
         lines.append(
-            f"{idx}. {route['name']} — {route['distance_km']:.1f} km — {route['group']} — {route['points']} puntos"
+            f"{idx}. {route['name']} — {route['distance_km']:.1f} km — {route['group']} — {route['points']} puntos — {segments} segmentos"
         )
     (STATIC_DIR / "rutas_resumen.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_map(routes: list[dict], polylines: dict[str, list[list[float]]]) -> None:
+def write_map(routes: list[dict], polylines: dict[str, list[list[list[float]]]]) -> None:
     total = sum(float(r["distance_km"]) for r in routes)
     routes_json = json.dumps(routes, ensure_ascii=False, separators=(",", ":"))
     polylines_json = json.dumps(polylines, ensure_ascii=False, separators=(",", ":"))
@@ -182,7 +255,7 @@ html,body,#map{{height:100%;margin:0}} body{{font-family:-apple-system,BlinkMacS
 </head>
 <body>
 <div id='map'></div>
-<div class='panel'><h1>🏍️ Historial de rutas moteras GPX</h1><p><b>{len(routes)} rutas/tramos</b> · {total:.1f} km aprox.</p><p>Mapa generado desde los GPX reales. Pulsa una ruta para ver distancia, grupo y puntos.</p></div>
+<div class='panel'><h1>🏍️ Historial de rutas moteras GPX</h1><p><b>{len(routes)} rutas/tramos</b> · {total:.1f} km aprox.</p><p>Mapa generado desde tracks GPX reales. Ya no une waypoints ni cortes de señal con líneas rectas.</p></div>
 <div id='legend' class='legend'><b>Rutas</b></div>
 <script>
 const routes={routes_json};
@@ -194,14 +267,21 @@ L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,
 const bounds=[];
 const legend=document.getElementById('legend');
 function colorFor(group){{ if(!groupColors[group]) groupColors[group]=colors[Object.keys(groupColors).length%colors.length]; return groupColors[group]; }}
+function normalizedSegments(raw){{
+  if(!Array.isArray(raw)) return [];
+  if(raw.length && Array.isArray(raw[0]) && typeof raw[0][0]==='number') return [raw];
+  return raw.filter(s=>Array.isArray(s) && s.length>=2);
+}}
 routes.forEach((r)=>{{
   const c=colorFor(r.group||'Rutas');
-  const pts=polylines[r.name]||[];
-  if(pts.length>=2){{
-    const line=L.polyline(pts,{{color:c,weight:4,opacity:.76}}).addTo(map);
-    line.bindPopup(`<b>${{r.name}}</b><br>Grupo: ${{r.group}}<br>Distancia aprox.: ${{r.distance_km}} km<br>Puntos GPX: ${{r.points}}`);
-    pts.forEach(p=>bounds.push(p));
-  }}
+  const segments=normalizedSegments(polylines[r.name]||[]);
+  segments.forEach((pts)=>{{
+    if(pts.length>=2){{
+      const line=L.polyline(pts,{{color:c,weight:4,opacity:.76}}).addTo(map);
+      line.bindPopup(`<b>${{r.name}}</b><br>Grupo: ${{r.group}}<br>Distancia aprox.: ${{r.distance_km}} km<br>Puntos GPX: ${{r.points}}<br>Segmentos: ${{r.segments||1}}`);
+      pts.forEach(p=>bounds.push(p));
+    }}
+  }});
 }});
 Object.entries(groupColors).forEach(([g,c])=>{{
   const div=document.createElement('div');
