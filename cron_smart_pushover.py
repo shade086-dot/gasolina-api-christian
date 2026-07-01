@@ -25,7 +25,9 @@ LOOKBACK_HOURS = int(os.getenv("SMART_LOOKBACK_HOURS", "14"))
 # Doble aviso para salidas desde casa: por defecto 45 y 30 min antes del evento.
 # Se puede cambiar en Render con SMART_OUT_NOTICE_MINS="60,30" o SMART_OUT_NOTICE_MINS="45,30".
 OUT_NOTICE_MINS_RAW = os.getenv("SMART_OUT_NOTICE_MINS", "45,30")
-RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "")
+# Vuelta a casa: antes estaba solo en 0 min. Con cron cada 15 min podía perderse
+# si Render ejecutaba a :45 y luego :15. Ahora avisa 15 min antes y al terminar.
+RETURN_NOTICE_MINS_RAW = os.getenv("SMART_RETURN_NOTICE_MINS", "15,0")
 
 FORUS_OUT_NOTICE_MIN = int(os.getenv("SMART_FORUS_OUT_NOTICE_MIN", "75"))
 FORUS_RETURN_NOTICE_MIN = int(os.getenv("SMART_FORUS_RETURN_NOTICE_MIN", "0"))
@@ -339,7 +341,9 @@ async def amain() -> int:
         print(
             f"[smart] Sin avisos. Eventos revisados: {len(events)}. "
             f"Acciones candidatas: {len(actions)}. Lookback: {LOOKBACK_HOURS}h. "
-            f"Tolerancia efectiva: {TOLERANCE_MIN}min. Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}."
+            f"Tolerancia efectiva: {TOLERANCE_MIN}min. "
+            f"Avisos salida: {_out_notice_offsets(OFFICE_OUT_NOTICE_MIN)}. "
+            f"Avisos vuelta: {_return_notice_offsets(OFFICE_RETURN_NOTICE_MIN)}."
         )
         _save_state(state)
         return 0
