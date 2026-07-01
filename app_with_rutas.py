@@ -6,6 +6,7 @@ Usar en Render como Start Command:
 from __future__ import annotations
 
 import main
+import gpx_preview_map_ext
 import gpx_routes_ext
 import maintenance_color_ext
 import visual_route_ext
@@ -13,5 +14,6 @@ import visual_route_ext
 maintenance_color_ext.install(main)
 visual_route_ext.install(main)
 gpx_routes_ext.install_routes(main)
+gpx_preview_map_ext.install(main)
 
 app = main.app
