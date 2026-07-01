@@ -65,19 +65,10 @@ def _global_bbox(routes: list[dict[str, Any]]) -> tuple[float, float, float, flo
 
 
 def _peninsula_bbox() -> tuple[float, float, float, float]:
-    # Bbox fija para que la vista se entienda como mapa peninsular y no como una nube de cajas.
-    return 35.35, -10.2, 44.55, 4.25
+    return 35.35, -10.35, 44.55, 4.35
 
 
-def _project(
-    lat: float,
-    lon: float,
-    bbox: tuple[float, float, float, float],
-    x0: int = 85,
-    y0: int = 145,
-    w: int = 730,
-    h: int = 455,
-) -> tuple[float, float]:
+def _project(lat: float, lon: float, bbox: tuple[float, float, float, float], x0: int = 85, y0: int = 145, w: int = 730, h: int = 455) -> tuple[float, float]:
     min_lat, min_lon, max_lat, max_lon = bbox
     lon_span = max(max_lon - min_lon, 0.000001)
     lat_span = max(max_lat - min_lat, 0.000001)
@@ -95,49 +86,51 @@ def _geo_path(points: list[tuple[float, float]], bbox: tuple[float, float, float
 
 
 def _peninsula_background(bbox: tuple[float, float, float, float], *, x0: int, y0: int, w: int, h: int) -> str:
+    # Costa esquemática bastante más reconocible que el polígono anterior.
     iberia = [
-        (43.55, -9.25), (42.65, -8.95), (41.45, -9.25), (40.00, -8.85), (38.65, -8.95),
-        (37.15, -7.45), (36.15, -5.65), (36.00, -3.20), (36.35, -1.75), (37.50, -0.65),
-        (38.80, 0.20), (40.20, 0.75), (41.25, 0.95), (42.00, 2.10), (42.70, 3.15),
-        (43.35, 1.60), (43.75, -0.60), (43.75, -3.00), (43.58, -5.30), (43.55, -7.20),
-        (43.55, -9.25),
+        (43.76, -9.05), (43.45, -8.35), (43.38, -7.25), (43.58, -5.85), (43.48, -4.25),
+        (43.65, -2.95), (43.45, -1.75), (43.25, -1.20), (42.85, -0.35), (42.65, 0.85),
+        (42.35, 1.95), (41.85, 3.05), (41.15, 2.45), (40.25, 1.10), (39.55, 0.25),
+        (38.70, -0.15), (37.95, -0.75), (37.25, -1.65), (36.78, -2.55), (36.58, -3.60),
+        (36.10, -5.35), (36.02, -6.15), (36.58, -6.95), (37.03, -7.45), (37.33, -8.35),
+        (38.05, -8.85), (39.05, -9.35), (40.25, -9.10), (41.10, -8.90), (41.82, -8.88),
+        (42.45, -8.75), (43.05, -9.05), (43.76, -9.05),
     ]
-    portugal_line = [(42.1, -8.15), (40.8, -7.1), (39.5, -7.4), (38.4, -7.1), (37.2, -7.4)]
-    pyrenees = [(43.0, -1.8), (42.8, -0.5), (42.75, 0.7), (42.65, 2.2), (42.45, 3.0)]
-    ebro = [(42.2, -2.0), (41.8, -1.0), (41.65, 0.0), (41.3, 0.8)]
-    tajo = [(40.7, -5.5), (40.3, -4.0), (40.0, -3.0), (39.6, -1.8)]
-    guadiana = [(38.8, -7.2), (38.8, -6.2), (38.9, -5.0), (38.6, -3.6)]
-    balear = [(39.7, 2.8), (39.4, 3.1), (39.0, 2.6), (38.85, 1.4)]
-    canary_note_x, canary_note_y = x0 + 35, y0 + h - 30
+    france = [(44.55, -2.8), (44.55, 4.35), (42.45, 4.35), (42.55, 2.8), (42.8, 1.4), (43.2, -0.8), (43.9, -2.0)]
+    africa = [(36.05, -10.35), (36.0, 4.35), (35.35, 4.35), (35.35, -10.35)]
+    portugal_line = [(42.05, -8.2), (41.2, -7.75), (40.25, -7.25), (39.25, -7.05), (38.25, -7.15), (37.25, -7.45)]
+    pyrenees = [(43.15, -1.7), (42.9, -0.5), (42.75, 0.7), (42.55, 1.6), (42.35, 2.8)]
+    central = [(41.1, -6.7), (40.75, -5.2), (40.65, -4.0), (40.45, -3.0), (40.25, -1.9)]
+    iberico = [(42.2, -2.6), (41.55, -1.8), (40.95, -1.1), (40.2, -0.6), (39.55, -0.3)]
+    betico = [(37.8, -5.4), (37.4, -4.2), (37.15, -3.2), (36.9, -2.3), (36.75, -1.5)]
+    ebro = [(42.35, -2.4), (41.95, -1.2), (41.7, -0.2), (41.3, 0.75)]
+    tajo = [(40.7, -6.1), (40.25, -4.7), (40.0, -3.2), (39.65, -1.6)]
+    guadiana = [(38.9, -7.4), (38.9, -6.2), (38.8, -5.2), (38.55, -3.5)]
+    balear = [(39.85, 2.95), (39.45, 3.15), (39.05, 2.65), (38.85, 1.45)]
+    canary_note_x, canary_note_y = x0 + 28, y0 + h - 28
     return f"""
       <rect x='{x0}' y='{y0}' width='{w}' height='{h}' rx='24' fill='#dff3ff' stroke='#bfdbfe'/>
-      <path d='{_geo_path([(44.5,-10.2),(44.5,4.25),(43.15,4.25),(43.5,1.5),(43.9,-1.5),(44.1,-5.5),(43.9,-9.8)], bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#e8f3df' opacity='.86'/>
-      <path d='{_geo_path([(36.0,-10.2),(36.0,4.25),(35.35,4.25),(35.35,-10.2)], bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#efe3c7' opacity='.55'/>
-      <path d='{_geo_path(iberia, bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#f5f1df' stroke='#94a3b8' stroke-width='2.2'/>
-      <path d='{_geo_path(portugal_line, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#cbd5e1' stroke-width='1.6' stroke-dasharray='6 6'/>
-      <path d='{_geo_path(pyrenees, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#94a3b8' stroke-width='2.5' opacity='.65'/>
-      <path d='{_geo_path(ebro, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#60a5fa' stroke-width='2' opacity='.55'/>
+      <path d='{_geo_path(france, bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#e7f3df' opacity='.86'/>
+      <path d='{_geo_path(africa, bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#efe3c7' opacity='.55'/>
+      <path d='{_geo_path(iberia, bbox, x0=x0, y0=y0, w=w, h=h)} Z' fill='#f4f0dc' stroke='#718096' stroke-width='2.6'/>
+      <path d='{_geo_path(portugal_line, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#aeb9c8' stroke-width='1.7' stroke-dasharray='6 6'/>
+      <path d='{_geo_path(pyrenees, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#8b9bb0' stroke-width='3.2' opacity='.70'/>
+      <path d='{_geo_path(central, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#c7b98b' stroke-width='3.2' opacity='.48'/>
+      <path d='{_geo_path(iberico, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#c7b98b' stroke-width='2.8' opacity='.44'/>
+      <path d='{_geo_path(betico, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#c7b98b' stroke-width='2.8' opacity='.44'/>
+      <path d='{_geo_path(ebro, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#60a5fa' stroke-width='2.2' opacity='.55'/>
       <path d='{_geo_path(tajo, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#60a5fa' stroke-width='2' opacity='.48'/>
       <path d='{_geo_path(guadiana, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#60a5fa' stroke-width='1.8' opacity='.38'/>
-      <path d='{_geo_path(balear, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#94a3b8' stroke-width='4' stroke-linecap='round' opacity='.65'/>
-      <text x='{x0+430}' y='{y0+255}' font-size='26' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='900' fill='#cbd5e1' opacity='.8'>ESPAÑA</text>
-      <text x='{x0+115}' y='{y0+285}' font-size='18' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='800' fill='#cbd5e1'>Portugal</text>
-      <text x='{x0+495}' y='{y0+40}' font-size='16' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='800' fill='#94a3b8'>Francia</text>
-      <text x='{x0+535}' y='{y0+h-58}' font-size='15' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='800' fill='#60a5fa'>Mediterráneo</text>
+      <path d='{_geo_path(balear, bbox, x0=x0, y0=y0, w=w, h=h)}' fill='none' stroke='#718096' stroke-width='4.2' stroke-linecap='round' opacity='.65'/>
+      <text x='{x0+430}' y='{y0+250}' font-size='29' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='900' fill='#cbd5e1' opacity='.82'>ESPAÑA</text>
+      <text x='{x0+115}' y='{y0+293}' font-size='18' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='850' fill='#cbd5e1'>Portugal</text>
+      <text x='{x0+520}' y='{y0+40}' font-size='16' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='850' fill='#94a3b8'>Francia</text>
+      <text x='{x0+535}' y='{y0+h-60}' font-size='15' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' font-weight='850' fill='#60a5fa'>Mediterráneo</text>
       <text x='{canary_note_x}' y='{canary_note_y}' font-size='12' font-family='-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' fill='#64748b'>Vista esquemática peninsular · rutas colocadas por lat/lon</text>
     """
 
 
-def _route_shapes(
-    routes: list[dict[str, Any]],
-    bbox: tuple[float, float, float, float],
-    *,
-    x0: int = 85,
-    y0: int = 145,
-    w: int = 730,
-    h: int = 455,
-    compact: bool = False,
-) -> str:
+def _route_shapes(routes: list[dict[str, Any]], bbox: tuple[float, float, float, float], *, x0: int = 85, y0: int = 145, w: int = 730, h: int = 455, compact: bool = False) -> str:
     colors = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#4f46e5"]
     pieces: list[str] = []
     for i, r in enumerate(routes):
@@ -147,7 +140,6 @@ def _route_shapes(
         if isinstance(bbox_r, list) and len(bbox_r) == 4:
             try:
                 min_lat, min_lon, max_lat, max_lon = [float(x) for x in bbox_r]
-                # Ignora puntos muy fuera de la península en la vista general.
                 if max_lat < bbox[0] or min_lat > bbox[2] or max_lon < bbox[1] or min_lon > bbox[3]:
                     continue
                 x1, y1 = _project(max_lat, min_lon, bbox, x0=x0, y0=y0, w=w, h=h)
@@ -202,10 +194,7 @@ def _preview_svg(main_module: Any) -> str:
         ("Cantabria", 43.35, -4.05),
     ]
     anchor_svg = "".join(_anchor_svg(label, lat, lon, peninsula_bbox, x0=82, y0=160, w=750, h=470) for label, lat, lon in anchors)
-    inset_anchor_svg = "".join(
-        _anchor_svg(label, lat, lon, local_bbox, x0=610, y0=435, w=205, h=160, small=True)
-        for label, lat, lon in anchors[:4]
-    )
+    inset_anchor_svg = "".join(_anchor_svg(label, lat, lon, local_bbox, x0=610, y0=435, w=205, h=160, small=True) for label, lat, lon in anchors[:4])
 
     return f"""<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720' viewBox='0 0 1200 720'>
   <defs><linearGradient id='bg' x1='0' x2='1' y1='0' y2='1'><stop offset='0' stop-color='#e8f2ff'/><stop offset='1' stop-color='#f7fafc'/></linearGradient></defs>
@@ -241,7 +230,7 @@ def _page(main_module: Any) -> str:
     group_html = "".join(f"<li><b>{_e(g)}</b>: {n} rutas</li>" for g, n in groups)
     last = st["last"]
     longest = st["longest"]
-    version = f"{st['count']}-{str(st['total']).replace('.', '-') }"
+    version = f"{st['count']}-{str(st['total']).replace('.', '-')}-p2"
     return f"""<!doctype html><html lang='es'><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/><title>Historial GPX</title>
 <style>body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f6f8;color:#111827}}.page{{max-width:1120px;margin:0 auto;padding:16px}}.hero,.card{{background:#fff;border:1px solid #dbe4ee;border-radius:20px;padding:18px;box-shadow:0 4px 18px rgba(31,41,51,.06)}}h1{{margin:0 0 6px;font-size:31px}}p{{color:#64748b;line-height:1.45}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}}.stat{{background:#f8fafc;border:1px solid #dbe4ee;border-radius:16px;padding:14px}}.stat b{{display:block;font-size:24px}}.stat span{{color:#64748b;font-size:13px;font-weight:700}}.links{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}}a.btn{{display:block;text-align:center;background:#111827;color:#fff;padding:13px;border-radius:14px;font-weight:850;text-decoration:none}}a.blue{{background:#2563eb}}a.green{{background:#16803c}}.grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;margin-top:14px}}.preview{{width:100%;border-radius:18px;border:1px solid #dbe4ee;background:#fff}}li{{margin:6px 0;color:#475569}}@media(max-width:820px){{.grid,.links,.stats{{grid-template-columns:1fr}}}}</style></head>
 <body><main class='page'><section class='hero'><h1>🏍️ Historial GPX</h1><p>Histórico real de rutas hechas, generado desde los GPX guardados en <b>gpx_historial/</b>. Sirve para ver el mapa completo y preparar la futura comparación de rutas nuevas.</p>
