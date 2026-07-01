@@ -8,8 +8,10 @@ from __future__ import annotations
 import main
 import gpx_routes_ext
 import maintenance_color_ext
+import visual_route_ext
 
 maintenance_color_ext.install(main)
+visual_route_ext.install(main)
 gpx_routes_ext.install_routes(main)
 
 app = main.app
