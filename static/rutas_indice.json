@@ -485,10 +485,10 @@
   },
   {
     "name": "Ruta_Estremera_2026-07-01.gpx",
-    "distance_km": 108.0,
+    "distance_km": 104.5,
     "bbox": [
       40.185345,
-      -3.365498,
+      -3.365005,
       40.493775,
       -3.044632
     ],
@@ -500,7 +500,7 @@
       40.465432,
       -3.267378
     ],
-    "points": 665,
+    "points": 251,
     "segments": 4,
     "group": "Alcarria / Estremera",
     "road_correct": true
