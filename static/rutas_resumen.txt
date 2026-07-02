@@ -23,4 +23,4 @@ Distancia acumulada aproximada: 2624.7 km
 20. MapitRoute-1wZtf.gpx — 66.5 km — Alcarria / Cifuentes-Trillo — 261 puntos — 1 segmentos
 21. MapitRoute-3Flwm.gpx — 81.2 km — Ruta 22 nueva — 321 puntos — 1 segmentos
 22. Ruta domingo.gpx — 181.4 km — Alcarria / Cifuentes-Trillo — 638 puntos — 4 segmentos
-23. Ruta_Estremera_2026-07-01.gpx — 108.0 km — Alcarria / Cifuentes-Trillo — 665 puntos — 4 segmentos
+23. Ruta_Estremera_2026-07-01.gpx — 108.0 km — Alcarria / Estremera — 665 puntos — 4 segmentos — trazado por carretera en mapa

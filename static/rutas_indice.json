@@ -18,7 +18,8 @@
     ],
     "points": 536,
     "segments": 2,
-    "group": "Local Anchuelo / Alcalá"
+    "group": "Local Anchuelo / Alcalá",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vPM2.gpx",
@@ -39,7 +40,8 @@
     ],
     "points": 771,
     "segments": 1,
-    "group": "Sierra Norte / Pueblos Negros"
+    "group": "Sierra Norte / Pueblos Negros",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vu9H.gpx",
@@ -60,7 +62,8 @@
     ],
     "points": 508,
     "segments": 1,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vuBS.gpx",
@@ -81,7 +84,8 @@
     ],
     "points": 123,
     "segments": 1,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vuCz.gpx",
@@ -102,7 +106,8 @@
     ],
     "points": 191,
     "segments": 1,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vuEH.gpx",
@@ -123,7 +128,8 @@
     ],
     "points": 309,
     "segments": 1,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vZ3Z.gpx",
@@ -144,7 +150,8 @@
     ],
     "points": 607,
     "segments": 2,
-    "group": "Rutas realizadas"
+    "group": "Rutas realizadas",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vZ5z.gpx",
@@ -165,7 +172,8 @@
     ],
     "points": 866,
     "segments": 1,
-    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vZ9w.gpx",
@@ -186,7 +194,8 @@
     ],
     "points": 248,
     "segments": 1,
-    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vZDy.gpx",
@@ -207,7 +216,8 @@
     ],
     "points": 142,
     "segments": 1,
-    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1vZp8.gpx",
@@ -228,7 +238,8 @@
     ],
     "points": 1550,
     "segments": 2,
-    "group": "Corredor norte / Burgos / Cantabria / Bizkaia"
+    "group": "Corredor norte / Burgos / Cantabria / Bizkaia",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1w9N6.gpx",
@@ -249,7 +260,8 @@
     ],
     "points": 313,
     "segments": 2,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1w9OI.gpx",
@@ -270,7 +282,8 @@
     ],
     "points": 55,
     "segments": 2,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1w9OS.gpx",
@@ -291,7 +304,8 @@
     ],
     "points": 415,
     "segments": 3,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1w9PK.gpx",
@@ -312,7 +326,8 @@
     ],
     "points": 620,
     "segments": 3,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1wERz.gpx",
@@ -333,7 +348,8 @@
     ],
     "points": 663,
     "segments": 2,
-    "group": "Sur/suroeste de Anchuelo"
+    "group": "Sur/suroeste de Anchuelo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1wGyf.gpx",
@@ -354,7 +370,8 @@
     ],
     "points": 356,
     "segments": 1,
-    "group": "Sur/suroeste de Anchuelo"
+    "group": "Sur/suroeste de Anchuelo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1wR8n.gpx",
@@ -375,7 +392,8 @@
     ],
     "points": 993,
     "segments": 4,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1wUTG.gpx",
@@ -396,7 +414,8 @@
     ],
     "points": 47,
     "segments": 4,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-1wZtf.gpx",
@@ -417,7 +436,8 @@
     ],
     "points": 261,
     "segments": 1,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "MapitRoute-3Flwm.gpx",
@@ -438,7 +458,8 @@
     ],
     "points": 321,
     "segments": 1,
-    "group": "Ruta 22 nueva"
+    "group": "Ruta 22 nueva",
+    "road_correct": false
   },
   {
     "name": "Ruta domingo.gpx",
@@ -459,7 +480,8 @@
     ],
     "points": 638,
     "segments": 4,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Cifuentes-Trillo",
+    "road_correct": false
   },
   {
     "name": "Ruta_Estremera_2026-07-01.gpx",
@@ -480,6 +502,7 @@
     ],
     "points": 665,
     "segments": 4,
-    "group": "Alcarria / Cifuentes-Trillo"
+    "group": "Alcarria / Estremera",
+    "road_correct": true
   }
 ]
