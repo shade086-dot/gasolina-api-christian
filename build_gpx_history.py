@@ -6,8 +6,8 @@ Uso:
 
 Entrada soportada:
     gpx_historial/*.gpx
-    gpx_historial/*.zip      (ZIP con GPX dentro)
-    gpx_historial/*.zip.b64  (ZIP en base64, útil si GitHub no permite subir binario desde un conector)
+    gpx_historial/*.zip
+    gpx_historial/*.zip.b64
 
 Salida:
     static/rutas_indice.json
@@ -17,7 +17,6 @@ Salida:
 from __future__ import annotations
 
 import base64
-import html
 import json
 import math
 import tempfile
@@ -42,13 +41,9 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def _lat_lon(elem: ET.Element) -> tuple[float, float] | None:
-    lat = elem.attrib.get("lat")
-    lon = elem.attrib.get("lon")
-    if lat is None or lon is None:
-        return None
     try:
-        return float(lat), float(lon)
-    except ValueError:
+        return float(elem.attrib["lat"]), float(elem.attrib["lon"])
+    except Exception:
         return None
 
 
@@ -59,16 +54,14 @@ def _tag(elem: ET.Element) -> str:
 def parse_gpx_segments(text: str) -> list[list[tuple[float, float]]]:
     """Lee el GPX respetando segmentos reales.
 
-    Muy importante: NO mezclamos los <wpt> start/end con los <trkpt>.
-    Muchos GPX de Mapit traen waypoints de inicio/fin antes del track; si se meten
-    en la misma polilínea, Leaflet dibuja líneas rectas cruzando media ruta.
+    No mezclamos <wpt> con <trkpt>. Eso evita unir inicio/fin o cortes de señal
+    con líneas rectas raras.
     """
     root = ET.fromstring(text.encode("utf-8"))
     segments: list[list[tuple[float, float]]] = []
 
-    # Preferimos tracks reales, separando cada trkseg para no unir cortes de señal.
     for trkseg in [e for e in root.iter() if _tag(e) == "trkseg"]:
-        pts: list[tuple[float, float]] = []
+        pts = []
         for child in trkseg:
             if _tag(child) != "trkpt":
                 continue
@@ -77,11 +70,9 @@ def parse_gpx_segments(text: str) -> list[list[tuple[float, float]]]:
                 pts.append(point)
         if len(pts) >= 2:
             segments.append(pts)
-
     if segments:
         return segments
 
-    # Fallback para GPX que vengan como ruta <rte><rtept>.
     for rte in [e for e in root.iter() if _tag(e) == "rte"]:
         pts = []
         for child in rte:
@@ -92,11 +83,9 @@ def parse_gpx_segments(text: str) -> list[list[tuple[float, float]]]:
                 pts.append(point)
         if len(pts) >= 2:
             segments.append(pts)
-
     if segments:
         return segments
 
-    # Último recurso: solo si el GPX no tiene track ni route, usamos waypoints.
     pts = []
     for elem in root.iter():
         if _tag(elem) != "wpt":
@@ -105,13 +94,6 @@ def parse_gpx_segments(text: str) -> list[list[tuple[float, float]]]:
         if point is not None:
             pts.append(point)
     return [pts] if len(pts) >= 2 else []
-
-
-def parse_gpx_points(text: str) -> list[tuple[float, float]]:
-    points: list[tuple[float, float]] = []
-    for segment in parse_gpx_segments(text):
-        points.extend(segment)
-    return points
 
 
 def read_gpx_sources() -> list[tuple[str, str]]:
@@ -137,7 +119,6 @@ def read_gpx_sources() -> list[tuple[str, str]]:
                     if name.lower().endswith(".gpx"):
                         sources.append((Path(name).name, zf.read(name).decode("utf-8", errors="replace")))
 
-    # Deduplica por nombre conservando la última aparición.
     dedup: dict[str, str] = {}
     for name, text in sources:
         dedup[name] = text
@@ -149,6 +130,8 @@ def route_group(name: str, bbox: list[float]) -> str:
     low = name.lower()
     if "3flwm" in low:
         return "Ruta 22 nueva"
+    if "estremera" in low:
+        return "Alcarria / Estremera"
     if max_lat >= 42.0 or max_lon <= -3.6:
         return "Corredor norte / Burgos / Cantabria / Bizkaia"
     if max_lon <= -2.6 and min_lon >= -3.4:
@@ -174,8 +157,6 @@ def simplify_points(points: list[tuple[float, float]], limit: int = 850) -> list
 
 
 def simplify_segments(segments: list[list[tuple[float, float]]], total_limit: int = 850) -> list[list[list[float]]]:
-    if not segments:
-        return []
     total_points = sum(len(s) for s in segments)
     simplified: list[list[list[float]]] = []
     for segment in segments:
@@ -198,7 +179,6 @@ def build_index() -> tuple[list[dict], dict[str, list[list[list[float]]]]]:
         points = [p for segment in segments for p in segment]
         if len(points) < 2:
             continue
-        # Distancia por segmento: no conectamos cortes de señal ni waypoints sueltos.
         distance = sum(haversine_km(a, b) for segment in segments for a, b in zip(segment, segment[1:]))
         lats = [p[0] for p in points]
         lons = [p[1] for p in points]
@@ -212,6 +192,7 @@ def build_index() -> tuple[list[dict], dict[str, list[list[list[float]]]]]:
             "points": len(points),
             "segments": len(segments),
             "group": route_group(name, bbox),
+            "road_correct": "estremera" in name.lower(),
         }
         routes.append(route)
         polylines[name] = simplify_segments(segments)
@@ -227,9 +208,8 @@ def write_summary(routes: list[dict]) -> None:
     ]
     for idx, route in enumerate(routes, 1):
         segments = int(route.get("segments") or 1)
-        lines.append(
-            f"{idx}. {route['name']} — {route['distance_km']:.1f} km — {route['group']} — {route['points']} puntos — {segments} segmentos"
-        )
+        extra = " — trazado por carretera en mapa" if route.get("road_correct") else ""
+        lines.append(f"{idx}. {route['name']} — {route['distance_km']:.1f} km — {route['group']} — {route['points']} puntos — {segments} segmentos{extra}")
     (STATIC_DIR / "rutas_resumen.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -247,7 +227,7 @@ def write_map(routes: list[dict], polylines: dict[str, list[list[list[float]]]])
 <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
 <style>
 html,body,#map{{height:100%;margin:0}} body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}
-.panel{{position:absolute;top:12px;left:54px;z-index:9999;background:#fff;padding:12px 14px;border-radius:12px;border:1px solid #dbe4ee;box-shadow:0 4px 18px rgba(0,0,0,.18);max-width:440px}}
+.panel{{position:absolute;top:12px;left:54px;z-index:9999;background:#fff;padding:12px 14px;border-radius:12px;border:1px solid #dbe4ee;box-shadow:0 4px 18px rgba(0,0,0,.18);max-width:460px}}
 .panel h1{{font-size:18px;margin:0 0 4px}} .panel p{{margin:2px 0;color:#475569;font-size:13px}}
 .legend{{position:absolute;right:12px;top:12px;z-index:9999;background:#fff;border:1px solid #dbe4ee;border-radius:12px;padding:10px;box-shadow:0 4px 18px rgba(0,0,0,.14);font-size:12px;max-height:72vh;overflow:auto}}
 .legend div{{margin:4px 0;white-space:nowrap}} .sw{{display:inline-block;width:18px;height:4px;border-radius:6px;margin-right:7px;vertical-align:middle}}
@@ -255,7 +235,7 @@ html,body,#map{{height:100%;margin:0}} body{{font-family:-apple-system,BlinkMacS
 </head>
 <body>
 <div id='map'></div>
-<div class='panel'><h1>🏍️ Historial de rutas moteras GPX</h1><p><b>{len(routes)} rutas/tramos</b> · {total:.1f} km aprox.</p><p>Mapa generado desde tracks GPX reales. Ya no une waypoints ni cortes de señal con líneas rectas.</p></div>
+<div class='panel'><h1>🏍️ Historial de rutas moteras GPX</h1><p><b>{len(routes)} rutas/tramos</b> · {total:.1f} km aprox.</p><p>Mapa desde GPX. En rutas reconstruidas, como Estremera, se corrige la línea con OSRM para seguir carretera.</p></div>
 <div id='legend' class='legend'><b>Rutas</b></div>
 <script>
 const routes={routes_json};
@@ -272,9 +252,60 @@ function normalizedSegments(raw){{
   if(raw.length && Array.isArray(raw[0]) && typeof raw[0][0]==='number') return [raw];
   return raw.filter(s=>Array.isArray(s) && s.length>=2);
 }}
+function flattenSegments(segments){{ return segments.flat().filter(p=>Array.isArray(p) && p.length>=2); }}
+function sampleWaypoints(points, maxPoints){{
+  if(points.length <= maxPoints) return points;
+  const out=[];
+  for(let i=0;i<maxPoints;i++){{
+    out.push(points[Math.round(i*(points.length-1)/(maxPoints-1))]);
+  }}
+  return out;
+}}
+async function fetchRoadChunk(chunk){{
+  const coords=chunk.map(p=>Number(p[1]).toFixed(6)+','+Number(p[0]).toFixed(6)).join(';');
+  const url='/visual-route-osrm?coords='+encodeURIComponent(coords);
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),6500);
+  const response=await fetch(url,{{signal:controller.signal,cache:'no-store'}});
+  clearTimeout(timer);
+  if(!response.ok) throw new Error('OSRM '+response.status);
+  const data=await response.json();
+  const geometry=data && data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+  if(!Array.isArray(geometry) || geometry.length<2) throw new Error('sin geometria');
+  return geometry.map(c=>[c[1],c[0]]).filter(p=>Number.isFinite(p[0]) && Number.isFinite(p[1]));
+}}
+async function drawRoadCorrected(r, c, segments){{
+  const raw=flattenSegments(segments);
+  raw.forEach(p=>bounds.push(p));
+  const waypoints=sampleWaypoints(raw, 16);
+  const all=[];
+  try{{
+    for(let i=0;i<waypoints.length-1;i+=5){{
+      const chunk=waypoints.slice(i, Math.min(i+6, waypoints.length));
+      if(chunk.length<2) continue;
+      const pts=await fetchRoadChunk(chunk);
+      if(all.length && pts.length) pts.shift();
+      all.push(...pts);
+    }}
+    if(all.length>=2){{
+      const line=L.polyline(all,{{color:c,weight:5,opacity:.9}}).addTo(map);
+      line.bindPopup(`<b>${{r.name}}</b><br>Grupo: ${{r.group}}<br>Distancia aprox.: ${{r.distance_km}} km<br>Trazado ajustado a carretera`);
+      all.forEach(p=>bounds.push(p));
+      if(bounds.length) map.fitBounds(bounds,{{padding:[30,30]}});
+      return;
+    }}
+  }}catch(err){{ console.log('No pude corregir por carretera', r.name, err && err.message ? err.message : err); }}
+  // Fallback: no vuelve a pintar el mallado entero; solo una aproximación muy discreta para no ensuciar el mapa.
+  const fallback=sampleWaypoints(raw, 12);
+  if(fallback.length>=2){{
+    const line=L.polyline(fallback,{{color:c,weight:3,opacity:.45,dashArray:'6,8'}}).addTo(map);
+    line.bindPopup(`<b>${{r.name}}</b><br>Vista aproximada. Falta GPX real para trazado perfecto.`);
+  }}
+}}
 routes.forEach((r)=>{{
   const c=colorFor(r.group||'Rutas');
   const segments=normalizedSegments(polylines[r.name]||[]);
+  if(r.road_correct){{ drawRoadCorrected(r,c,segments); return; }}
   segments.forEach((pts)=>{{
     if(pts.length>=2){{
       const line=L.polyline(pts,{{color:c,weight:4,opacity:.76}}).addTo(map);
